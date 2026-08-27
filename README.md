@@ -15,7 +15,7 @@ Local files, YouTube VOD/live via a companion Chrome extension, playlists, capti
 
 3. Open `GrokPlayer.slnx` and build **x64**.
 
-The Chrome extension lives in a separate repository.
+The Chrome extension is in a separate repository: [grokplayer-extension](https://github.com/EmirEvcil/grokplayer-extension).
 
 ## License notes
 
