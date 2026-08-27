@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Window
+    x:Class="Grok.Player.App.DownloadsWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Downloads">
+    <Grid
+        x:Name="Root"
+        HorizontalAlignment="Stretch"
+        VerticalAlignment="Stretch"
+        RequestedTheme="Dark"
+        Background="#FF101012"
+        PointerMoved="EmptyArea_PointerMoved"
+        PointerPressed="EmptyArea_PointerPressed"
+        PointerReleased="EmptyArea_PointerReleased"
+        PointerCaptureLost="EmptyArea_PointerReleased">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="40" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="48" />
+        </Grid.RowDefinitions>
+        <Grid
+            Background="{StaticResource GrokChromeBrush}"
+            BorderBrush="{StaticResource GrokLineBrush}"
+            BorderThickness="0,0,0,1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Grid x:Name="TitleDrag" Background="Transparent">
+                <TextBlock
+                    Margin="12,0,8,0"
+                    VerticalAlignment="Center"
+                    FontSize="13"
+                    FontWeight="SemiBold"
+                    Foreground="{StaticResource GrokAccentBrush}"
+                    Text="Downloads" />
+            </Grid>
+            <StackPanel
+                x:Name="ChromeButtons"
+                Grid.Column="1"
+                Orientation="Horizontal">
+                <Button
+                    x:Name="PinButton"
+                    Click="Pin_Click"
+                    Style="{StaticResource ChromeButton}"
+                    ToolTipService.ToolTip="Keep above player">
+                    <FontIcon x:Name="PinIcon" FontSize="12" Glyph="&#xE840;" />
+                </Button>
+                <Button
+                    Click="Close_Click"
+                    Style="{StaticResource ChromeButton}"
+                    ToolTipService.ToolTip="Close">
+                    <FontIcon FontSize="12" Glyph="&#xE8BB;" />
+                </Button>
+            </StackPanel>
+        </Grid>
+        <Grid Grid.Row="1" Background="#FF101012">
+            <ScrollViewer
+                x:Name="BodyScroll"
+                Padding="12,10"
+                HorizontalScrollBarVisibility="Disabled"
+                VerticalScrollBarVisibility="Auto">
+                <StackPanel x:Name="JobHost" Spacing="8" />
+            </ScrollViewer>
+            <StackPanel
+                x:Name="EmptyState"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Spacing="8"
+                Visibility="Collapsed">
+                <FontIcon
+                    FontSize="22"
+                    Foreground="{StaticResource GrokMutedBrush}"
+                    Glyph="&#xE896;" />
+                <TextBlock
+                    HorizontalAlignment="Center"
+                    FontSize="13"
+                    Foreground="{StaticResource GrokMutedBrush}"
+                    Text="Queue is empty" />
+            </StackPanel>
+        </Grid>
+        <Grid
+            Grid.Row="2"
+            Padding="14,0"
+            Background="{StaticResource GrokChromeBrush}"
+            BorderBrush="{StaticResource GrokLineBrush}"
+            BorderThickness="0,1,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock
+                x:Name="SummaryText"
+                VerticalAlignment="Center"
+                FontSize="12"
+                Foreground="{StaticResource GrokMutedBrush}"
+                Text="No downloads" />
+            <TextBlock
+                x:Name="CountText"
+                Grid.Column="1"
+                VerticalAlignment="Center"
+                FontSize="11"
+                Foreground="{StaticResource GrokMutedBrush}" />
+        </Grid>
+    </Grid>
+</Window>

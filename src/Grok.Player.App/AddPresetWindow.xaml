@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Window
+    x:Class="Grok.Player.App.AddPresetWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="text input">
+    <Grid
+        x:Name="Root"
+        Background="#FF101012"
+        PointerMoved="EmptyArea_PointerMoved"
+        PointerPressed="EmptyArea_PointerPressed"
+        PointerReleased="EmptyArea_PointerReleased"
+        PointerCaptureLost="EmptyArea_PointerReleased">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="40" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="52" />
+        </Grid.RowDefinitions>
+
+        <Grid
+            Background="{StaticResource GrokChromeBrush}"
+            BorderBrush="{StaticResource GrokLineBrush}"
+            BorderThickness="0,0,0,1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Grid
+                x:Name="TitleDrag"
+                Background="Transparent"
+                HorizontalAlignment="Stretch"
+                VerticalAlignment="Stretch">
+                <TextBlock
+                    Margin="12,0,8,0"
+                    VerticalAlignment="Center"
+                    FontSize="13"
+                    FontWeight="SemiBold"
+                    Foreground="{StaticResource GrokAccentBrush}"
+                    Text="text input" />
+            </Grid>
+            <Button
+                Grid.Column="1"
+                Click="Close_Click"
+                Style="{StaticResource ChromeButton}"
+                ToolTipService.ToolTip="Close">
+                <FontIcon FontSize="12" Glyph="&#xE8BB;" />
+            </Button>
+        </Grid>
+
+        <Grid Grid.Row="1" Margin="20,16,20,8">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <TextBlock
+                FontSize="13"
+                Foreground="{StaticResource GrokMutedBrush}"
+                Text="Preset name" />
+            <TextBox
+                x:Name="NameBox"
+                Grid.Row="1"
+                MinHeight="36"
+                Margin="0,10,0,0"
+                Padding="10,8"
+                HorizontalAlignment="Stretch"
+                VerticalAlignment="Stretch"
+                CornerRadius="0"
+                FontSize="13" />
+        </Grid>
+
+        <StackPanel
+            Grid.Row="2"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Orientation="Horizontal"
+            Spacing="10">
+            <Button
+                Width="88"
+                Height="30"
+                Click="Ok_Click"
+                Content="OK"
+                CornerRadius="0" />
+            <Button
+                Width="88"
+                Height="30"
+                Click="Close_Click"
+                Content="Cancel"
+                CornerRadius="0" />
+        </StackPanel>
+    </Grid>
+</Window>

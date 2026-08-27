@@ -1,0 +1,349 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<UserControl
+    x:Class="Grok.Player.App.ResizePreferencesPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer
+        Padding="16,14,16,16"
+        HorizontalScrollBarVisibility="Disabled"
+        VerticalScrollBarVisibility="Auto">
+        <StackPanel Spacing="14">
+            <Border
+                Background="{StaticResource GrokChromeBrush}"
+                BorderBrush="{StaticResource GrokLineBrush}"
+                BorderThickness="1"
+                CornerRadius="0">
+                <StackPanel Margin="14,12" Spacing="10">
+                    <TextBlock
+                        FontSize="13"
+                        FontWeight="SemiBold"
+                        Foreground="{StaticResource GrokAccentBrush}"
+                        Text="Scaling quality" />
+                    <Grid ColumnSpacing="10" RowSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="130" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <TextBlock
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Preset" />
+                        <ComboBox
+                            x:Name="QualityPresetBox"
+                            Grid.Column="1"
+                            MinHeight="32"
+                            HorizontalAlignment="Stretch"
+                            CornerRadius="0"
+                            FontSize="12"
+                            SelectionChanged="QualityPresetBox_SelectionChanged" />
+                        <TextBlock
+                            Grid.Row="1"
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Upscaling" />
+                        <ComboBox
+                            x:Name="UpscaleBox"
+                            Grid.Row="1"
+                            Grid.Column="1"
+                            MinHeight="32"
+                            HorizontalAlignment="Stretch"
+                            CornerRadius="0"
+                            FontSize="12"
+                            SelectionChanged="UpscaleBox_SelectionChanged" />
+                        <TextBlock
+                            Grid.Row="2"
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Downscaling" />
+                        <ComboBox
+                            x:Name="DownscaleBox"
+                            Grid.Row="2"
+                            Grid.Column="1"
+                            MinHeight="32"
+                            HorizontalAlignment="Stretch"
+                            CornerRadius="0"
+                            FontSize="12"
+                            SelectionChanged="DownscaleBox_SelectionChanged" />
+                        <TextBlock
+                            Grid.Row="3"
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Chroma scaling" />
+                        <ComboBox
+                            x:Name="ChromaBox"
+                            Grid.Row="3"
+                            Grid.Column="1"
+                            MinHeight="32"
+                            HorizontalAlignment="Stretch"
+                            CornerRadius="0"
+                            FontSize="12"
+                            SelectionChanged="ChromaBox_SelectionChanged" />
+                        <TextBlock
+                            Grid.Row="4"
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Anti-ringing" />
+                        <ComboBox
+                            x:Name="AntiRingBox"
+                            Grid.Row="4"
+                            Grid.Column="1"
+                            MinHeight="32"
+                            HorizontalAlignment="Stretch"
+                            CornerRadius="0"
+                            FontSize="12"
+                            SelectionChanged="AntiRingBox_SelectionChanged" />
+                        <TextBlock
+                            Grid.Row="5"
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Deband" />
+                        <ComboBox
+                            x:Name="DebandBox"
+                            Grid.Row="5"
+                            Grid.Column="1"
+                            MinHeight="32"
+                            HorizontalAlignment="Stretch"
+                            CornerRadius="0"
+                            FontSize="12"
+                            SelectionChanged="DebandBox_SelectionChanged" />
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <Border
+                Background="{StaticResource GrokChromeBrush}"
+                BorderBrush="{StaticResource GrokLineBrush}"
+                BorderThickness="1"
+                CornerRadius="0">
+                <StackPanel Margin="14,12" Spacing="10">
+                    <TextBlock
+                        FontSize="13"
+                        FontWeight="SemiBold"
+                        Foreground="{StaticResource GrokAccentBrush}"
+                        Text="Video resizing" />
+                    <Grid ColumnSpacing="10" RowSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="130" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <TextBlock
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Resize video" />
+                        <ComboBox
+                            x:Name="PolicyBox"
+                            Grid.Column="1"
+                            MinHeight="32"
+                            HorizontalAlignment="Stretch"
+                            CornerRadius="0"
+                            FontSize="12"
+                            SelectionChanged="PolicyBox_SelectionChanged" />
+                        <TextBlock
+                            x:Name="SizingLabel"
+                            Grid.Row="1"
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Sizing mode" />
+                        <ComboBox
+                            x:Name="SizingBox"
+                            Grid.Row="1"
+                            Grid.Column="1"
+                            MinHeight="32"
+                            HorizontalAlignment="Stretch"
+                            CornerRadius="0"
+                            FontSize="12"
+                            SelectionChanged="SizingBox_SelectionChanged" />
+                        <TextBlock
+                            x:Name="MultiplierLabel"
+                            Grid.Row="2"
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Multiplier" />
+                        <ComboBox
+                            x:Name="MultiplierBox"
+                            Grid.Row="2"
+                            Grid.Column="1"
+                            MinHeight="32"
+                            HorizontalAlignment="Stretch"
+                            CornerRadius="0"
+                            FontSize="12"
+                            SelectionChanged="MultiplierBox_SelectionChanged" />
+                        <TextBlock
+                            x:Name="CustomMultiplierLabel"
+                            Grid.Row="3"
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Custom factor" />
+                        <TextBox
+                            x:Name="CustomMultiplierBox"
+                            Grid.Row="3"
+                            Grid.Column="1"
+                            MinHeight="32"
+                            Padding="8,4"
+                            CornerRadius="0"
+                            FontSize="12"
+                            LostFocus="CustomMultiplierBox_LostFocus" />
+                        <TextBlock
+                            x:Name="ResolutionLabel"
+                            Grid.Row="4"
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Resolution" />
+                        <StackPanel
+                            x:Name="ResolutionHost"
+                            Grid.Row="4"
+                            Grid.Column="1"
+                            Orientation="Horizontal"
+                            Spacing="8">
+                            <TextBox
+                                x:Name="WidthBox"
+                                Width="88"
+                                MinHeight="32"
+                                Padding="8,4"
+                                CornerRadius="0"
+                                FontSize="12"
+                                TextChanged="WidthBox_TextChanged"
+                                LostFocus="WidthBox_LostFocus" />
+                            <TextBlock
+                                VerticalAlignment="Center"
+                                FontSize="13"
+                                Foreground="{StaticResource GrokMutedBrush}"
+                                Text="×" />
+                            <TextBox
+                                x:Name="HeightBox"
+                                Width="88"
+                                MinHeight="32"
+                                Padding="8,4"
+                                CornerRadius="0"
+                                FontSize="12"
+                                TextChanged="HeightBox_TextChanged"
+                                LostFocus="HeightBox_LostFocus" />
+                            <CheckBox
+                                x:Name="KeepAspectBox"
+                                VerticalAlignment="Center"
+                                Content="Keep aspect ratio"
+                                FontSize="12"
+                                Foreground="{StaticResource GrokMutedBrush}"
+                                Checked="KeepAspectBox_Changed"
+                                Unchecked="KeepAspectBox_Changed" />
+                        </StackPanel>
+                        <TextBlock
+                            Grid.Row="5"
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Aspect ratio" />
+                        <ComboBox
+                            x:Name="AspectBox"
+                            Grid.Row="5"
+                            Grid.Column="1"
+                            MinHeight="32"
+                            HorizontalAlignment="Stretch"
+                            CornerRadius="0"
+                            FontSize="12"
+                            SelectionChanged="AspectBox_SelectionChanged" />
+                        <TextBlock
+                            x:Name="CustomRatioLabel"
+                            Grid.Row="6"
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Custom ratio" />
+                        <StackPanel
+                            x:Name="CustomRatioHost"
+                            Grid.Row="6"
+                            Grid.Column="1"
+                            Orientation="Horizontal"
+                            Spacing="8">
+                            <TextBox
+                                x:Name="RatioXBox"
+                                Width="64"
+                                MinHeight="32"
+                                Padding="8,4"
+                                CornerRadius="0"
+                                FontSize="12"
+                                TextChanged="CustomRatio_TextChanged"
+                                LostFocus="CustomRatio_LostFocus" />
+                            <TextBlock
+                                VerticalAlignment="Center"
+                                FontSize="13"
+                                Foreground="{StaticResource GrokMutedBrush}"
+                                Text=":" />
+                            <TextBox
+                                x:Name="RatioYBox"
+                                Width="64"
+                                MinHeight="32"
+                                Padding="8,4"
+                                CornerRadius="0"
+                                FontSize="12"
+                                TextChanged="CustomRatio_TextChanged"
+                                LostFocus="CustomRatio_LostFocus" />
+                        </StackPanel>
+                        <TextBlock
+                            Grid.Row="7"
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Shortcut step" />
+                        <ComboBox
+                            x:Name="StepBox"
+                            Grid.Row="7"
+                            Grid.Column="1"
+                            MinHeight="32"
+                            HorizontalAlignment="Stretch"
+                            CornerRadius="0"
+                            FontSize="12"
+                            SelectionChanged="StepBox_SelectionChanged" />
+                    </Grid>
+                    <StackPanel
+                        Margin="0,4,0,0"
+                        Orientation="Horizontal"
+                        Spacing="8">
+                        <Button
+                            Click="ResizePreview_Click"
+                            Content="Preview"
+                            Style="{StaticResource PanelChromeButton}" />
+                        <Button
+                            Click="ResizeApply_Click"
+                            Content="Apply"
+                            Style="{StaticResource PanelChromeButton}" />
+                        <Button
+                            Click="ResizeReset_Click"
+                            Content="Reset"
+                            Style="{StaticResource PanelChromeButton}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

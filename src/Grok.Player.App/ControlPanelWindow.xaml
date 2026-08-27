@@ -1,0 +1,666 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Window
+    x:Class="Grok.Player.App.ControlPanelWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Control panel">
+    <Grid
+        x:Name="Root"
+        Background="#FF101012"
+        PointerMoved="EmptyArea_PointerMoved"
+        PointerPressed="EmptyArea_PointerPressed"
+        PointerReleased="EmptyArea_PointerReleased"
+        PointerCaptureLost="EmptyArea_PointerReleased">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="40" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Grid
+            x:Name="TitleBar"
+            Background="{StaticResource GrokChromeBrush}"
+            BorderBrush="{StaticResource GrokLineBrush}"
+            BorderThickness="0,0,0,1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <Grid
+                x:Name="TitleDrag"
+                Background="Transparent"
+                HorizontalAlignment="Stretch"
+                VerticalAlignment="Stretch">
+                <StackPanel
+                    Margin="12,0,8,0"
+                    VerticalAlignment="Center"
+                    Orientation="Horizontal"
+                    Spacing="8">
+                    <Image
+                        Width="16"
+                        Height="16"
+                        Source="Assets/Logo.jpg"
+                        Stretch="Uniform" />
+                    <TextBlock
+                        VerticalAlignment="Center"
+                        FontSize="13"
+                        FontWeight="SemiBold"
+                        Foreground="{StaticResource GrokAccentBrush}"
+                        Text="Control panel" />
+                </StackPanel>
+            </Grid>
+
+            <StackPanel
+                Grid.Column="1"
+                VerticalAlignment="Center"
+                Orientation="Horizontal">
+                <Slider
+                    x:Name="OpacitySlider"
+                    Width="68"
+                    Height="22"
+                    Margin="0,0,2,0"
+                    VerticalAlignment="Center"
+                    IsThumbToolTipEnabled="False"
+                    Maximum="1"
+                    Minimum="0.2"
+                    StepFrequency="0.01"
+                    Style="{StaticResource SquareSlider}"
+                    Value="1"
+                    ValueChanged="OpacitySlider_ValueChanged" />
+                <Button
+                    x:Name="PinButton"
+                    Click="PinButton_Click"
+                    Style="{StaticResource ChromeButton}"
+                    ToolTipService.ToolTip="Keep above player">
+                    <FontIcon x:Name="PinIcon" FontSize="12" Glyph="&#xE840;" />
+                </Button>
+                <Button
+                    x:Name="CloseButton"
+                    Click="CloseButton_Click"
+                    Style="{StaticResource ChromeButton}"
+                    ToolTipService.ToolTip="Close">
+                    <FontIcon FontSize="12" Glyph="&#xE8BB;" />
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <Grid Grid.Row="1">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="32" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Grid x:Name="TabStrip" Background="{StaticResource GrokChromeBrush}">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Border
+                    x:Name="AudioTabChrome"
+                    BorderBrush="{StaticResource GrokLineBrush}"
+                    BorderThickness="0,0,1,0">
+                    <Button
+                        x:Name="AudioTab"
+                        Click="Tab_Click"
+                        Content="Audio"
+                        Style="{StaticResource PanelTabButton}"
+                        Tag="Audio" />
+                </Border>
+                <Border
+                    x:Name="VideoTabChrome"
+                    Grid.Column="1"
+                    BorderBrush="{StaticResource GrokLineBrush}"
+                    BorderThickness="0,0,1,1">
+                    <Button
+                        x:Name="VideoTab"
+                        Click="Tab_Click"
+                        Content="Video"
+                        Style="{StaticResource PanelTabButton}"
+                        Tag="Video" />
+                </Border>
+                <Border
+                    x:Name="SubtitleTabChrome"
+                    Grid.Column="2"
+                    BorderBrush="{StaticResource GrokLineBrush}"
+                    BorderThickness="0,0,1,1">
+                    <Button
+                        x:Name="SubtitleTab"
+                        Click="Tab_Click"
+                        Content="Subtitle"
+                        Style="{StaticResource PanelTabButton}"
+                        Tag="Subtitle" />
+                </Border>
+                <Border
+                    x:Name="PlaybackTabChrome"
+                    Grid.Column="3"
+                    BorderBrush="{StaticResource GrokLineBrush}"
+                    BorderThickness="0,0,0,1">
+                    <Button
+                        x:Name="PlaybackTab"
+                        Click="Tab_Click"
+                        Content="Playback"
+                        Style="{StaticResource PanelTabButton}"
+                        Tag="Playback" />
+                </Border>
+            </Grid>
+
+            <Border
+                x:Name="TabBody"
+                Grid.Row="1"
+                Background="{StaticResource GrokPanelBrush}">
+                <Grid>
+                <Grid x:Name="AudioPane">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="60" />
+                    </Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="36" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <Grid Margin="8,0,6,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <CheckBox
+                            x:Name="EqEnabledBox"
+                            Width="20"
+                            Height="20"
+                            MinWidth="20"
+                            MinHeight="20"
+                            Margin="0,0,6,0"
+                            Padding="0"
+                            VerticalAlignment="Center"
+                            Checked="EqEnabled_Changed"
+                            Unchecked="EqEnabled_Changed" />
+                        <TextBlock
+                            Grid.Column="1"
+                            Margin="0,0,8,0"
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Equalizer" />
+                        <Button
+                            x:Name="PresetDropButton"
+                            Grid.Column="2"
+                            MinWidth="80"
+                            Margin="0,4,6,4"
+                            Padding="8,3,6,3"
+                            HorizontalAlignment="Stretch"
+                            VerticalAlignment="Stretch"
+                            Style="{StaticResource PanelChromeButton}">
+                            <Grid>
+                                <TextBlock
+                                    x:Name="PresetDropText"
+                                    Margin="0,0,14,0"
+                                    VerticalAlignment="Center"
+                                    FontSize="12"
+                                    Foreground="#E6E6EA"
+                                    Text="Default"
+                                    TextTrimming="CharacterEllipsis" />
+                                <FontIcon
+                                    HorizontalAlignment="Right"
+                                    FontSize="9"
+                                    Foreground="{StaticResource GrokMutedBrush}"
+                                    Glyph="&#xE70D;" />
+                            </Grid>
+                            <Button.Flyout>
+                                <MenuFlyout
+                                    x:Name="PresetListFlyout"
+                                    AreOpenCloseAnimationsEnabled="False"
+                                    MenuFlyoutPresenterStyle="{StaticResource CompactMenuFlyout}"
+                                    Opening="PresetList_Opening"
+                                    Placement="Bottom" />
+                            </Button.Flyout>
+                        </Button>
+                        <Button
+                            x:Name="PresetMenuButton"
+                            Grid.Column="3"
+                            Width="68"
+                            Margin="0,4,0,4"
+                            Padding="8,3"
+                            VerticalAlignment="Stretch"
+                            HorizontalContentAlignment="Center"
+                            Content="Preset"
+                            Style="{StaticResource PanelChromeButton}">
+                            <Button.Flyout>
+                                <MenuFlyout
+                                    AreOpenCloseAnimationsEnabled="False"
+                                    MenuFlyoutPresenterStyle="{StaticResource CompactMenuFlyout}"
+                                    Placement="Bottom">
+                                    <MenuFlyoutItem Click="PresetAdd_Click" Style="{StaticResource CompactMenuItem}" Text="Add" />
+                                    <MenuFlyoutItem
+                                        x:Name="PresetSaveItem"
+                                        Click="PresetSave_Click"
+                                        Style="{StaticResource CompactMenuItem}"
+                                        Text="Save" />
+                                    <MenuFlyoutItem
+                                        x:Name="PresetDeleteItem"
+                                        Click="PresetDelete_Click"
+                                        Style="{StaticResource CompactMenuItem}"
+                                        Text="Delete" />
+                                    <MenuFlyoutSeparator />
+                                    <MenuFlyoutItem Click="PresetDefault_Click" Style="{StaticResource CompactMenuItem}" Text="Default" />
+                                </MenuFlyout>
+                            </Button.Flyout>
+                        </Button>
+                    </Grid>
+
+                    <Grid
+                        x:Name="BandHost"
+                        Grid.Row="1"
+                        Margin="4,0,2,0" />
+
+                    <Border
+                        Grid.Row="0"
+                        Grid.RowSpan="2"
+                        Grid.Column="1"
+                        Background="#FF101012"
+                        BorderBrush="{StaticResource GrokLineBrush}"
+                        BorderThickness="1,0,0,0">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="36" />
+                                <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <TextBlock
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center"
+                                FontSize="11"
+                                FontWeight="SemiBold"
+                                Foreground="{StaticResource GrokMutedBrush}"
+                                Text="VOL" />
+                            <Slider
+                                x:Name="MasterSlider"
+                                Grid.Row="1"
+                                Maximum="100"
+                                Minimum="0"
+                                StepFrequency="1"
+                                Style="{StaticResource VerticalSquareSlider}"
+                                ValueChanged="MasterSlider_ValueChanged" />
+                            <TextBlock
+                                Grid.Row="2"
+                                HorizontalAlignment="Center"
+                                FontSize="10"
+                                Foreground="{StaticResource GrokMutedBrush}"
+                                Margin="0,4,0,0"
+                                Text="MST" />
+                        </Grid>
+                    </Border>
+                </Grid>
+                <Grid x:Name="VideoPane" Visibility="Collapsed">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <Grid
+                        Margin="14,14,14,10"
+                        VerticalAlignment="Center"
+                        RowSpacing="10">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="92" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="76" />
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Brightness" />
+                        <Slider
+                            x:Name="BrightnessSlider"
+                            Grid.Column="1"
+                            VerticalAlignment="Center"
+                            Maximum="100"
+                            Minimum="0"
+                            StepFrequency="1"
+                            Style="{StaticResource SquareSlider}"
+                            ValueChanged="PictureSlider_ValueChanged" />
+                        <Button
+                            Grid.Column="2"
+                            Margin="8,0,0,0"
+                            Click="BrightnessDefault_Click"
+                            Content="Default"
+                            Style="{StaticResource PanelChromeButton}" />
+
+                        <TextBlock
+                            Grid.Row="1"
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Contrast" />
+                        <Slider
+                            x:Name="ContrastSlider"
+                            Grid.Row="1"
+                            Grid.Column="1"
+                            VerticalAlignment="Center"
+                            Maximum="100"
+                            Minimum="0"
+                            StepFrequency="1"
+                            Style="{StaticResource SquareSlider}"
+                            ValueChanged="PictureSlider_ValueChanged" />
+                        <Button
+                            Grid.Row="1"
+                            Grid.Column="2"
+                            Margin="8,0,0,0"
+                            Click="ContrastDefault_Click"
+                            Content="Default"
+                            Style="{StaticResource PanelChromeButton}" />
+
+                        <TextBlock
+                            Grid.Row="2"
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Saturation" />
+                        <Slider
+                            x:Name="SaturationSlider"
+                            Grid.Row="2"
+                            Grid.Column="1"
+                            VerticalAlignment="Center"
+                            Maximum="100"
+                            Minimum="0"
+                            StepFrequency="1"
+                            Style="{StaticResource SquareSlider}"
+                            ValueChanged="PictureSlider_ValueChanged" />
+                        <Button
+                            Grid.Row="2"
+                            Grid.Column="2"
+                            Margin="8,0,0,0"
+                            Click="SaturationDefault_Click"
+                            Content="Default"
+                            Style="{StaticResource PanelChromeButton}" />
+
+                        <TextBlock
+                            Grid.Row="3"
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Color" />
+                        <Slider
+                            x:Name="HueSlider"
+                            Grid.Row="3"
+                            Grid.Column="1"
+                            VerticalAlignment="Center"
+                            Maximum="100"
+                            Minimum="0"
+                            StepFrequency="1"
+                            Style="{StaticResource SquareSlider}"
+                            ValueChanged="PictureSlider_ValueChanged" />
+                        <Button
+                            Grid.Row="3"
+                            Grid.Column="2"
+                            Margin="8,0,0,0"
+                            Click="HueDefault_Click"
+                            Content="Default"
+                            Style="{StaticResource PanelChromeButton}" />
+                    </Grid>
+
+                    <Border
+                        Grid.Row="1"
+                        Background="#FF101012"
+                        BorderBrush="{StaticResource GrokLineBrush}"
+                        BorderThickness="0,1,0,0">
+                        <Grid Margin="14,10,14,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel
+                                VerticalAlignment="Center"
+                                Orientation="Horizontal"
+                                Spacing="18">
+                                <CheckBox
+                                    x:Name="SofterToggle"
+                                    Click="SofterToggle_Click"
+                                    Content="Softer"
+                                    Style="{StaticResource PanelRadioCheck}" />
+                                <CheckBox
+                                    x:Name="SharpenToggle"
+                                    Click="SharpenToggle_Click"
+                                    Content="Sharpen"
+                                    Style="{StaticResource PanelRadioCheck}" />
+                                <CheckBox
+                                    x:Name="DeblockToggle"
+                                    Click="DeblockToggle_Click"
+                                    Content="Deblock"
+                                    Style="{StaticResource PanelRadioCheck}" />
+                            </StackPanel>
+                            <Button
+                                x:Name="CaptureButton"
+                                Grid.Column="1"
+                                MinWidth="92"
+                                Margin="16,0,0,0"
+                                Click="Capture_Click"
+                                Content="Capture"
+                                Style="{StaticResource PanelChromeButton}" />
+                        </Grid>
+                    </Border>
+                </Grid>
+                <Grid x:Name="SubtitlePane" Visibility="Collapsed">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <Grid Margin="16,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="100" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Font" />
+                        <ComboBox
+                            x:Name="SubFontBox"
+                            Grid.Column="1"
+                            MinHeight="32"
+                            Margin="10,0,10,0"
+                            VerticalAlignment="Center"
+                            HorizontalAlignment="Stretch"
+                            CornerRadius="0"
+                            FontSize="12"
+                            SelectionChanged="SubFontBox_SelectionChanged" />
+                        <TextBlock
+                            Grid.Column="2"
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Size" />
+                        <ComboBox
+                            x:Name="SubSizeBox"
+                            Grid.Column="3"
+                            MinHeight="32"
+                            Margin="10,0,0,0"
+                            VerticalAlignment="Center"
+                            CornerRadius="0"
+                            FontSize="12"
+                            SelectionChanged="SubSizeBox_SelectionChanged" />
+                    </Grid>
+
+                    <Border
+                        Grid.Row="1"
+                        Background="#FF161618"
+                        BorderBrush="{StaticResource GrokLineBrush}"
+                        BorderThickness="0,1,0,0">
+                        <StackPanel
+                            Margin="16,0"
+                            VerticalAlignment="Center"
+                            Orientation="Horizontal"
+                            Spacing="10">
+                            <TextBlock
+                                VerticalAlignment="Center"
+                                FontSize="13"
+                                Foreground="{StaticResource GrokMutedBrush}"
+                                Text="Position" />
+                            <Button Click="SubUp_Click" Style="{StaticResource SubIconButton}" ToolTipService.ToolTip="Move subtitle up">
+                                <FontIcon FontSize="12" Glyph="&#xE74A;" />
+                            </Button>
+                            <Button Click="SubDown_Click" Style="{StaticResource SubIconButton}" ToolTipService.ToolTip="Move subtitle down">
+                                <FontIcon FontSize="12" Glyph="&#xE74B;" />
+                            </Button>
+                            <Button Click="SubLeft_Click" Style="{StaticResource SubIconButton}" ToolTipService.ToolTip="Move subtitle left">
+                                <FontIcon FontSize="12" Glyph="&#xE76B;" />
+                            </Button>
+                            <Button Click="SubRight_Click" Style="{StaticResource SubIconButton}" ToolTipService.ToolTip="Move subtitle right">
+                                <FontIcon FontSize="12" Glyph="&#xE76C;" />
+                            </Button>
+                        </StackPanel>
+                    </Border>
+
+                    <Border
+                        Grid.Row="2"
+                        Background="#FF101012"
+                        BorderBrush="{StaticResource GrokLineBrush}"
+                        BorderThickness="0,1,0,0">
+                        <StackPanel
+                            Margin="16,0"
+                            VerticalAlignment="Center"
+                            Orientation="Horizontal"
+                            Spacing="10">
+                            <TextBlock
+                                VerticalAlignment="Center"
+                                FontSize="13"
+                                Foreground="{StaticResource GrokMutedBrush}"
+                                Text="Sync" />
+                            <Button Click="SubSlower_Click" Content="Slower" Style="{StaticResource PanelChromeButton}" />
+                            <Button Click="SubFaster_Click" Content="Faster" Style="{StaticResource PanelChromeButton}" />
+                            <Button Click="SubSyncDefault_Click" Content="Default" Style="{StaticResource PanelChromeButton}" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+                <Grid x:Name="PlaybackPane" Visibility="Collapsed">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <StackPanel
+                        Margin="16,0"
+                        VerticalAlignment="Center"
+                        Orientation="Horizontal"
+                        Spacing="10">
+                        <TextBlock
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="Seek" />
+                        <Button Click="SeekBackMin_Click" Content="-1m" Style="{StaticResource PanelChromeButton}" ToolTipService.ToolTip="Rewind 1 minute" />
+                        <Button Click="SeekBackHalf_Click" Content="-0.5s" Style="{StaticResource PanelChromeButton}" ToolTipService.ToolTip="Rewind 0.5 seconds" />
+                        <Button Click="SeekFwdHalf_Click" Content="+0.5s" Style="{StaticResource PanelChromeButton}" ToolTipService.ToolTip="Forward 0.5 seconds" />
+                        <Button Click="SeekFwdMin_Click" Content="+1m" Style="{StaticResource PanelChromeButton}" ToolTipService.ToolTip="Forward 1 minute" />
+                    </StackPanel>
+
+                    <Border
+                        Grid.Row="1"
+                        Background="#FF161618"
+                        BorderBrush="{StaticResource GrokLineBrush}"
+                        BorderThickness="0,1,0,0">
+                        <StackPanel
+                            Margin="16,0"
+                            VerticalAlignment="Center"
+                            Orientation="Horizontal"
+                            Spacing="10">
+                            <TextBlock
+                                VerticalAlignment="Center"
+                                FontSize="13"
+                                Foreground="{StaticResource GrokMutedBrush}"
+                                Text="Speed" />
+                            <Button Click="SpeedSlower_Click" Content="Slower" Style="{StaticResource PanelChromeButton}" />
+                            <Button Click="SpeedFaster_Click" Content="Faster" Style="{StaticResource PanelChromeButton}" />
+                            <Button Click="SpeedDefault_Click" Content="Default" Style="{StaticResource PanelChromeButton}" />
+                            <TextBlock
+                                x:Name="SpeedValueText"
+                                VerticalAlignment="Center"
+                                FontSize="13"
+                                Foreground="{StaticResource GrokAccentBrush}"
+                                Text="1.0x" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border
+                        Grid.Row="2"
+                        Background="#FF101012"
+                        BorderBrush="{StaticResource GrokLineBrush}"
+                        BorderThickness="0,1,0,0">
+                        <Grid Margin="16,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock
+                                VerticalAlignment="Center"
+                                FontSize="13"
+                                Foreground="{StaticResource GrokMutedBrush}"
+                                Text="A-B" />
+                            <Button
+                                x:Name="LoopAButton"
+                                Grid.Column="1"
+                                MinHeight="36"
+                                Margin="10,0,8,0"
+                                HorizontalAlignment="Stretch"
+                                Click="LoopA_Click"
+                                Content="—"
+                                Style="{StaticResource PanelChromeButton}" />
+                            <TextBlock
+                                Grid.Column="2"
+                                VerticalAlignment="Center"
+                                FontSize="13"
+                                Foreground="{StaticResource GrokMutedBrush}"
+                                Text="~" />
+                            <Button
+                                x:Name="LoopBButton"
+                                Grid.Column="3"
+                                MinHeight="36"
+                                Margin="8,0,10,0"
+                                HorizontalAlignment="Stretch"
+                                Click="LoopB_Click"
+                                Content="—"
+                                Style="{StaticResource PanelChromeButton}" />
+                            <Button
+                                Grid.Column="4"
+                                Click="LoopUndo_Click"
+                                Style="{StaticResource SubIconButton}"
+                                ToolTipService.ToolTip="Undo A-B">
+                                <FontIcon FontSize="12" Glyph="&#xE10A;" />
+                            </Button>
+                        </Grid>
+                    </Border>
+                </Grid>
+                <TextBlock
+                    x:Name="TabPlaceholder"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    FontSize="13"
+                    Foreground="{StaticResource GrokMutedBrush}"
+                    Text="Audio"
+                    Visibility="Collapsed" />
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

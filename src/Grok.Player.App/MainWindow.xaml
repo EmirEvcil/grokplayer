@@ -1,0 +1,758 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Window
+    x:Class="Grok.Player.App.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Grok.Player.App.Controls"
+    Title="GrokPlayer">
+    <Window.SystemBackdrop>
+        <MicaBackdrop Kind="BaseAlt" />
+    </Window.SystemBackdrop>
+
+    <Grid
+        x:Name="ContentRoot"
+        AllowDrop="True"
+        Background="#FF101012"
+        KeyboardAcceleratorPlacementMode="Hidden"
+        DragOver="ContentRoot_DragOver"
+        DragLeave="ContentRoot_DragLeave"
+        Drop="ContentRoot_Drop"
+        PointerMoved="ContentRoot_PointerMoved"
+        PointerPressed="EmptyArea_PointerPressed"
+        PointerReleased="WindowDrag_PointerReleased"
+        PointerCaptureLost="WindowDrag_PointerReleased"
+        RightTapped="EmptyArea_RightTapped">
+        <Grid.KeyboardAccelerators>
+            <KeyboardAccelerator
+                Key="Number1"
+                Invoked="ImageAdjust_Invoked"
+                Modifiers="Control" />
+            <KeyboardAccelerator
+                Key="Number2"
+                Invoked="ImageAdjust_Invoked"
+                Modifiers="Control" />
+            <KeyboardAccelerator
+                Key="Number3"
+                Invoked="ImageAdjust_Invoked"
+                Modifiers="Control" />
+            <KeyboardAccelerator
+                Key="Number4"
+                Invoked="ImageAdjust_Invoked"
+                Modifiers="Control" />
+            <KeyboardAccelerator
+                Key="Number5"
+                Invoked="ImageAdjust_Invoked"
+                Modifiers="Control" />
+            <KeyboardAccelerator
+                Key="NumberPad1"
+                Invoked="ImageAdjust_Invoked"
+                Modifiers="Control" />
+            <KeyboardAccelerator
+                Key="NumberPad2"
+                Invoked="ImageAdjust_Invoked"
+                Modifiers="Control" />
+            <KeyboardAccelerator
+                Key="NumberPad3"
+                Invoked="ImageAdjust_Invoked"
+                Modifiers="Control" />
+            <KeyboardAccelerator
+                Key="NumberPad4"
+                Invoked="ImageAdjust_Invoked"
+                Modifiers="Control" />
+            <KeyboardAccelerator
+                Key="NumberPad5"
+                Invoked="ImageAdjust_Invoked"
+                Modifiers="Control" />
+        </Grid.KeyboardAccelerators>
+        <Grid.Resources>
+            <MenuFlyout
+                x:Name="AppMenu"
+                Closed="AppMenu_Closed"
+                Opening="AppMenu_Opening"
+                Placement="Bottom">
+                <MenuFlyoutItem Click="OpenButton_Click" Text="Open file(s)…" />
+                <MenuFlyoutSubItem Text="Open">
+                    <MenuFlyoutItem IsEnabled="False" Text="Coming soon" />
+                </MenuFlyoutSubItem>
+                <MenuFlyoutSubItem x:Name="StreamMenu" Text="Stream">
+                    <MenuFlyoutItem Click="OpenStream_Click" Text="Open stream…" />
+                    <MenuFlyoutItem Click="AddStream_Click" Text="Add stream…" />
+                    <MenuFlyoutSeparator />
+                    <MenuFlyoutItem x:Name="GoLiveMenuItem" Click="GoLive_Click" Text="Go to live" />
+                    <MenuFlyoutItem x:Name="StartRecordMenuItem" Click="StartRecord_Click" Text="Start recording…" />
+                    <MenuFlyoutItem x:Name="StopRecordMenuItem" Click="StopRecord_Click" Text="Stop recording" />
+                </MenuFlyoutSubItem>
+                <MenuFlyoutSubItem Text="Albums/favorites">
+                    <MenuFlyoutItem IsEnabled="False" Text="Coming soon" />
+                </MenuFlyoutSubItem>
+                <MenuFlyoutItem Text="Close playback" />
+                <MenuFlyoutSeparator />
+                <MenuFlyoutSubItem Text="Playback">
+                    <MenuFlyoutItem IsEnabled="False" Text="Coming soon" />
+                </MenuFlyoutSubItem>
+                <MenuFlyoutSubItem Text="Subtitles">
+                    <MenuFlyoutSubItem x:Name="AddSelectSubtitlesMenu" Text="Add/select subtitles">
+                        <MenuFlyoutItem Click="LoadSubtitle_Click" Text="Load subtitle…" />
+                        <MenuFlyoutItem Click="AddSubtitle_Click" Text="Add subtitle" />
+                        <MenuFlyoutItem Click="MergeSubtitles_Click" Text="Merge subtitles" />
+                        <MenuFlyoutSeparator />
+                        <MenuFlyoutItem Click="SubtitleCycle_Click" Text="Subtitle cycle" />
+                        <RadioMenuFlyoutItem
+                            x:Name="SubtitlesOffItem"
+                            Click="SubtitlesOff_Click"
+                            GroupName="GrokSubtitles"
+                            Text="Off" />
+                    </MenuFlyoutSubItem>
+                    <MenuFlyoutSubItem x:Name="StreamSubtitlesMenu" Text="Stream subtitles">
+                        <RadioMenuFlyoutItem
+                            x:Name="StreamSubsOffItem"
+                            Click="StreamSubtitleMode_Click"
+                            GroupName="GrokStreamSubs"
+                            Tag="Off"
+                            Text="Off" />
+                        <RadioMenuFlyoutItem
+                            x:Name="StreamSubsOnItem"
+                            Click="StreamSubtitleMode_Click"
+                            GroupName="GrokStreamSubs"
+                            Tag="On"
+                            Text="On" />
+                        <RadioMenuFlyoutItem
+                            x:Name="StreamSubsBrowserItem"
+                            Click="StreamSubtitleMode_Click"
+                            GroupName="GrokStreamSubs"
+                            Tag="Browser"
+                            Text="Subtitle browser integration" />
+                    </MenuFlyoutSubItem>
+                </MenuFlyoutSubItem>
+                <MenuFlyoutSubItem Text="Video">
+                    <MenuFlyoutItem IsEnabled="False" Text="Coming soon" />
+                </MenuFlyoutSubItem>
+                <MenuFlyoutSubItem Text="Audio">
+                    <MenuFlyoutItem IsEnabled="False" Text="Coming soon" />
+                </MenuFlyoutSubItem>
+                <MenuFlyoutSubItem Text="Filters">
+                    <MenuFlyoutItem IsEnabled="False" Text="Coming soon" />
+                </MenuFlyoutSubItem>
+                <MenuFlyoutSubItem Text="Skins">
+                    <MenuFlyoutItem IsEnabled="False" Text="Coming soon" />
+                </MenuFlyoutSubItem>
+                <MenuFlyoutSubItem Text="Miscellaneous">
+                    <MenuFlyoutItem IsEnabled="False" Text="Coming soon" />
+                </MenuFlyoutSubItem>
+                <MenuFlyoutSeparator />
+                <MenuFlyoutSubItem Text="Frame size">
+                    <MenuFlyoutItem IsEnabled="False" Text="Coming soon" />
+                </MenuFlyoutSubItem>
+                <MenuFlyoutSubItem Text="Aspect ratio">
+                    <MenuFlyoutItem IsEnabled="False" Text="Coming soon" />
+                </MenuFlyoutSubItem>
+                <MenuFlyoutSubItem Text="Window size">
+                    <MenuFlyoutItem IsEnabled="False" Text="Coming soon" />
+                </MenuFlyoutSubItem>
+                <MenuFlyoutItem Text="Full screen (preserve aspect)" />
+                <MenuFlyoutItem Text="Full screen (stretch)" />
+                <MenuFlyoutSeparator />
+                <MenuFlyoutItem Click="Preferences_Click" Text="Preferences…" />
+                <ToggleMenuFlyoutItem
+                    x:Name="AppMenuPlaylistItem"
+                    Click="AppMenuPlaylist_Click"
+                    Text="Playlist" />
+                <ToggleMenuFlyoutItem
+                    x:Name="AppMenuControlPanelItem"
+                    Click="AppMenuControlPanel_Click"
+                    Text="Control panel" />
+                <ToggleMenuFlyoutItem Text="Playback/system information" />
+                <MenuFlyoutItem Text="About…" />
+                <MenuFlyoutSeparator />
+                <MenuFlyoutItem Click="CloseButton_Click" Text="Exit" />
+            </MenuFlyout>
+        </Grid.Resources>
+        <Grid.RowDefinitions>
+            <RowDefinition x:Name="TopRow" Height="40" />
+            <RowDefinition Height="*" />
+            <RowDefinition x:Name="BottomRow" Height="Auto" />
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition x:Name="PlaylistColumn" Width="0" />
+        </Grid.ColumnDefinitions>
+
+        <Grid
+            x:Name="VideoHost"
+            Grid.Row="0"
+            Grid.RowSpan="3"
+            Grid.Column="0"
+            AllowDrop="True"
+            Background="#FF0A0A0C"
+            DragOver="ContentRoot_DragOver"
+            Drop="ContentRoot_Drop"
+            PointerMoved="VideoHost_PointerMoved"
+            PointerPressed="EmptyArea_PointerPressed"
+            PointerReleased="WindowDrag_PointerReleased"
+            PointerCaptureLost="WindowDrag_PointerReleased"
+            PointerExited="VideoHost_PointerExited"
+            RightTapped="EmptyArea_RightTapped"
+            SizeChanged="VideoHost_SizeChanged">
+            <StackPanel
+                x:Name="EmptyState"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Spacing="10">
+                <Image Width="72" Height="72" Source="Assets/Logo.jpg" Stretch="Uniform" />
+                <TextBlock HorizontalAlignment="Center" FontSize="14" Foreground="{StaticResource GrokMutedBrush}" Text="Drop a video or MP3 to play" />
+                <TextBlock HorizontalAlignment="Center" FontSize="12" Foreground="#66707078" Text="H.264 · HEVC · AV1 · MP3 · NVIDIA decode" />
+            </StackPanel>
+            <Grid
+                x:Name="LoadOverlay"
+                Background="#E6101012"
+                IsHitTestVisible="False"
+                Visibility="Collapsed">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="14">
+                    <Grid
+                        Width="48"
+                        Height="48"
+                        RenderTransformOrigin="0.5,0.5">
+                        <Grid.RenderTransform>
+                            <RotateTransform x:Name="LoadSpin" />
+                        </Grid.RenderTransform>
+                        <Rectangle
+                            Width="48"
+                            Height="2"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Top"
+                            Fill="{StaticResource GrokAccentBrush}" />
+                        <Rectangle
+                            Width="2"
+                            Height="48"
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center"
+                            Fill="#FFD9899C" />
+                        <Rectangle
+                            Width="48"
+                            Height="2"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Bottom"
+                            Fill="{StaticResource GrokAccentBrush}" />
+                        <Rectangle
+                            Width="2"
+                            Height="48"
+                            HorizontalAlignment="Left"
+                            VerticalAlignment="Center"
+                            Fill="#66F0C93A" />
+                    </Grid>
+                    <TextBlock
+                        HorizontalAlignment="Center"
+                        FontSize="12"
+                        FontWeight="SemiBold"
+                        Foreground="{StaticResource GrokAccentBrush}"
+                        Text="Loading" />
+                </StackPanel>
+            </Grid>
+        </Grid>
+
+        <Grid
+            x:Name="TopBar"
+            Grid.Column="0"
+            Grid.ColumnSpan="2"
+            Background="{StaticResource GrokChromeBrush}"
+            BorderBrush="{StaticResource GrokLineBrush}"
+            BorderThickness="0,0,0,1"
+            PointerEntered="TopBar_PointerEntered"
+            PointerExited="TopBar_PointerExited"
+            PointerPressed="EmptyArea_PointerPressed"
+            RightTapped="EmptyArea_RightTapped">
+            <Grid.RenderTransform>
+                <TranslateTransform x:Name="TopBarSlide" />
+            </Grid.RenderTransform>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <Button
+                x:Name="BrandButton"
+                Background="Transparent"
+                BorderThickness="0"
+                Click="BrandButton_Click"
+                CornerRadius="0"
+                Height="36"
+                MinHeight="36"
+                Padding="10,0,10,0"
+                VerticalAlignment="Center">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Image Width="18" Height="18" Source="Assets/Logo.jpg" Stretch="Uniform" />
+                    <TextBlock
+                        VerticalAlignment="Center"
+                        FontSize="13"
+                        FontWeight="SemiBold"
+                        Foreground="{StaticResource GrokAccentBrush}"
+                        Text="GrokPlayer" />
+                    <FontIcon
+                        x:Name="BrandChevron"
+                        Margin="2,1,0,0"
+                        VerticalAlignment="Center"
+                        FontSize="10"
+                        Foreground="{StaticResource GrokMutedBrush}"
+                        Glyph="&#xE70D;" />
+                </StackPanel>
+            </Button>
+
+            <Grid
+                x:Name="TitleDrag"
+                Grid.Column="1"
+                Background="Transparent"
+                HorizontalAlignment="Stretch"
+                VerticalAlignment="Stretch">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="4,0,12,0">
+                    <Rectangle x:Name="SepFormat" Width="1" Height="14" Fill="{StaticResource GrokLineBrush}" Margin="8,0" Visibility="Collapsed" />
+                    <TextBlock x:Name="TitleFormatText" FontSize="12" Foreground="{StaticResource GrokPinkBrush}" Visibility="Collapsed" />
+                    <Rectangle x:Name="SepIndex" Width="1" Height="14" Fill="{StaticResource GrokLineBrush}" Margin="8,0" Visibility="Collapsed" />
+                    <TextBlock x:Name="TitleIndexText" FontSize="12" Foreground="{StaticResource GrokAccentBrush}" Visibility="Collapsed" />
+                    <Rectangle x:Name="SepName" Width="1" Height="14" Fill="{StaticResource GrokLineBrush}" Margin="8,0" Visibility="Collapsed" />
+                    <TextBlock x:Name="TitleNameText" FontSize="12" Foreground="{StaticResource GrokMutedBrush}" TextTrimming="CharacterEllipsis" />
+                </StackPanel>
+            </Grid>
+
+            <StackPanel x:Name="CaptionButtons" Grid.Column="2" Orientation="Horizontal">
+                <Button x:Name="PinButton" Style="{StaticResource ChromeButton}" Click="PinButton_Click" ToolTipService.ToolTip="Always on top">
+                    <FontIcon x:Name="PinIcon" FontSize="12" Glyph="&#xE840;" />
+                </Button>
+                <Button x:Name="CinemaButton" Style="{StaticResource ChromeButton}" Click="CinemaButton_Click" ToolTipService.ToolTip="Hide interface">
+                    <FontIcon x:Name="CinemaIcon" FontSize="12" Glyph="&#xE8B3;" />
+                </Button>
+                <Button x:Name="MinButton" Style="{StaticResource ChromeButton}" Click="MinButton_Click" ToolTipService.ToolTip="Minimize">
+                    <FontIcon FontSize="12" Glyph="&#xE921;" />
+                </Button>
+                <Button x:Name="MaxButton" Style="{StaticResource ChromeButton}" Click="MaxButton_Click" ToolTipService.ToolTip="Maximize">
+                    <FontIcon x:Name="MaxIcon" FontSize="12" Glyph="&#xE922;" />
+                </Button>
+                <Button x:Name="FullButton" Style="{StaticResource ChromeButton}" Click="FullButton_Click" ToolTipService.ToolTip="Fullscreen">
+                    <FontIcon x:Name="FullIcon" FontSize="12" Glyph="&#xE740;" />
+                </Button>
+                <Button x:Name="CloseButton" Style="{StaticResource ChromeButton}" Click="CloseButton_Click" ToolTipService.ToolTip="Close">
+                    <FontIcon FontSize="12" Glyph="&#xE8BB;" />
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <Border
+                x:Name="PlaylistPanel"
+                Grid.Row="1"
+                Grid.RowSpan="2"
+                Grid.Column="1"
+                Width="280"
+                AllowDrop="True"
+                Background="{StaticResource GrokPanelBrush}"
+                BorderBrush="{StaticResource GrokLineBrush}"
+                BorderThickness="1,0,0,0"
+                DragOver="ContentRoot_DragOver"
+                Drop="ContentRoot_Drop"
+                PointerMoved="WindowDrag_PointerMoved"
+                PointerPressed="EmptyArea_PointerPressed"
+                PointerReleased="WindowDrag_PointerReleased"
+                PointerCaptureLost="WindowDrag_PointerReleased"
+                PointerEntered="PlaylistPanel_PointerEntered"
+                Opacity="0"
+                Visibility="Collapsed">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="36" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <Grid
+                        x:Name="PlaylistTabStrip"
+                        MinHeight="36"
+                        Background="{StaticResource GrokChromeBrush}"
+                        Canvas.ZIndex="2">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Border
+                            x:Name="LocalTabChrome"
+                            Background="{StaticResource GrokPanelBrush}"
+                            BorderBrush="{StaticResource GrokLineBrush}"
+                            BorderThickness="0,0,1,0">
+                            <Button
+                                x:Name="LocalTabButton"
+                                Click="LocalTab_Click"
+                                Content="Local"
+                                FontSize="13"
+                                FontWeight="SemiBold"
+                                Foreground="{StaticResource GrokAccentBrush}"
+                                Style="{StaticResource PanelTabButton}" />
+                        </Border>
+                        <Border
+                            x:Name="StreamTabChrome"
+                            Grid.Column="1"
+                            Background="{StaticResource GrokChromeBrush}"
+                            BorderBrush="{StaticResource GrokLineBrush}"
+                            BorderThickness="0,0,0,1">
+                            <Button
+                                x:Name="StreamTabButton"
+                                Click="StreamTab_Click"
+                                Content="Stream"
+                                FontSize="13"
+                                FontWeight="SemiBold"
+                                Foreground="{StaticResource GrokMutedBrush}"
+                                Style="{StaticResource PanelTabButton}" />
+                        </Border>
+                        <Grid
+                            Grid.Column="2"
+                            Background="{StaticResource GrokChromeBrush}"
+                            BorderBrush="{StaticResource GrokLineBrush}"
+                            BorderThickness="1,0,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="36" />
+                                <ColumnDefinition Width="36" />
+                            </Grid.ColumnDefinitions>
+                            <Button
+                                x:Name="DownloadsButton"
+                                Width="36"
+                                Height="36"
+                                MinWidth="36"
+                                MinHeight="36"
+                                Padding="0"
+                                HorizontalAlignment="Stretch"
+                                VerticalAlignment="Stretch"
+                                HorizontalContentAlignment="Center"
+                                VerticalContentAlignment="Center"
+                                Click="Downloads_Click"
+                                Style="{StaticResource PanelTabButton}"
+                                ToolTipService.ToolTip="Downloads">
+                                <FontIcon
+                                    FontSize="11"
+                                    Glyph="&#xE896;"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center" />
+                            </Button>
+                            <Button
+                                x:Name="AddStreamButton"
+                                Grid.Column="1"
+                                Width="36"
+                                Height="36"
+                                MinWidth="36"
+                                MinHeight="36"
+                                Padding="0"
+                                HorizontalAlignment="Stretch"
+                                VerticalAlignment="Stretch"
+                                HorizontalContentAlignment="Center"
+                                VerticalContentAlignment="Center"
+                                Click="AddStream_Click"
+                                Style="{StaticResource PanelTabButton}"
+                                ToolTipService.ToolTip="Add stream">
+                                <FontIcon
+                                    FontSize="11"
+                                    Glyph="&#xE710;"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center" />
+                            </Button>
+                        </Grid>
+                    </Grid>
+                    <Grid Grid.Row="1">
+                    <ListView
+                        x:Name="LocalPlaylistView"
+                        AllowDrop="True"
+                        CanDragItems="False"
+                        CanReorderItems="False"
+                        DoubleTapped="PlaylistView_DoubleTapped"
+                        DragOver="ContentRoot_DragOver"
+                        Drop="ContentRoot_Drop"
+                        IsItemClickEnabled="False"
+                        RightTapped="PlaylistView_RightTapped"
+                        ItemContainerStyle="{StaticResource PlaylistItemContainer}"
+                        Style="{StaticResource PlaylistList}">
+                        <ListView.ContextFlyout>
+                            <MenuFlyout Opening="PlaylistMenu_Opening">
+                                <MenuFlyoutItem x:Name="PlaylistPlayItem" Click="PlaylistPlay_Click" Text="Play" />
+                                <MenuFlyoutItem x:Name="PlaylistPlayNewItem" Click="PlaylistPlayNew_Click" Text="Play in new instance" />
+                                <MenuFlyoutSeparator />
+                                <MenuFlyoutSubItem Text="Album" />
+                                <MenuFlyoutSubItem Text="Playlist" />
+                                <MenuFlyoutSubItem Text="Playback queue" />
+                                <MenuFlyoutSubItem Text="Add &amp; edit" />
+                                <MenuFlyoutSubItem Text="Remove" />
+                                <MenuFlyoutSubItem Text="Sort" />
+                                <MenuFlyoutSubItem Text="Select" />
+                                <MenuFlyoutSubItem Text="View" />
+                                <MenuFlyoutSeparator />
+                                <MenuFlyoutItem Text="Detect file durations" />
+                                <MenuFlyoutItem Text="File information..." />
+                                <MenuFlyoutItem Text="Generate thumbnail image..." />
+                                <MenuFlyoutSeparator />
+                                <MenuFlyoutItem Text="Playlist settings..." />
+                                <MenuFlyoutItem Text="Close playlist" />
+                            </MenuFlyout>
+                        </ListView.ContextFlyout>
+                        <ListView.ItemTemplate>
+                            <DataTemplate>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock
+                                        FontSize="12"
+                                        Foreground="#C8C8CE"
+                                        Text="{Binding Title}"
+                                        TextTrimming="CharacterEllipsis" />
+                                    <TextBlock
+                                        Grid.Column="1"
+                                        Margin="10,0,0,0"
+                                        VerticalAlignment="Center"
+                                        FontSize="10"
+                                        Foreground="#6E6E76"
+                                        Text="{Binding Format}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                    <ListView
+                        x:Name="StreamPlaylistView"
+                        AllowDrop="True"
+                        CanDragItems="False"
+                        CanReorderItems="False"
+                        DoubleTapped="PlaylistView_DoubleTapped"
+                        DragOver="ContentRoot_DragOver"
+                        Drop="ContentRoot_Drop"
+                        IsItemClickEnabled="False"
+                        Opacity="0"
+                        RightTapped="PlaylistView_RightTapped"
+                        Visibility="Collapsed"
+                        ItemContainerStyle="{StaticResource PlaylistItemContainer}"
+                        Style="{StaticResource PlaylistList}">
+                        <ListView.ContextFlyout>
+                            <MenuFlyout Opening="PlaylistMenu_Opening">
+                                <MenuFlyoutItem Click="PlaylistPlay_Click" Text="Play" />
+                                <MenuFlyoutItem Click="PlaylistPlayNew_Click" Text="Play in new instance" />
+                                <MenuFlyoutItem x:Name="StreamDownloadItem" Click="PlaylistDownload_Click" Text="Download" />
+                                <MenuFlyoutItem x:Name="StreamDownloadAllItem" Click="PlaylistDownloadAll_Click" Text="Download all" />
+                                <MenuFlyoutSeparator />
+                                <MenuFlyoutSubItem Text="Album" />
+                                <MenuFlyoutSubItem Text="Playlist" />
+                                <MenuFlyoutSubItem Text="Playback queue" />
+                                <MenuFlyoutSubItem Text="Add &amp; edit" />
+                                <MenuFlyoutSubItem Text="Remove" />
+                                <MenuFlyoutSubItem Text="Sort" />
+                                <MenuFlyoutSubItem Text="Select" />
+                                <MenuFlyoutSubItem Text="View" />
+                                <MenuFlyoutSeparator />
+                                <MenuFlyoutItem Text="Detect file durations" />
+                                <MenuFlyoutItem Text="File information..." />
+                                <MenuFlyoutItem Text="Generate thumbnail image..." />
+                                <MenuFlyoutSeparator />
+                                <MenuFlyoutItem Text="Playlist settings..." />
+                                <MenuFlyoutItem Text="Close playlist" />
+                            </MenuFlyout>
+                        </ListView.ContextFlyout>
+                        <ListView.ItemTemplate>
+                            <DataTemplate>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock
+                                        FontSize="12"
+                                        Foreground="#C8C8CE"
+                                        Text="{Binding Title}"
+                                        TextTrimming="CharacterEllipsis" />
+                                    <TextBlock
+                                        Grid.Column="1"
+                                        Margin="10,0,0,0"
+                                        VerticalAlignment="Center"
+                                        FontSize="10"
+                                        Foreground="#6E6E76"
+                                        Text="{Binding Format}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                    <StackPanel
+                        x:Name="PlaylistEmptyState"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Spacing="8"
+                        IsHitTestVisible="False">
+                        <FontIcon
+                            x:Name="PlaylistEmptyIcon"
+                            FontSize="20"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Glyph="&#xE8B7;" />
+                        <TextBlock
+                            x:Name="PlaylistEmptyTitle"
+                            HorizontalAlignment="Center"
+                            FontSize="13"
+                            FontWeight="SemiBold"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="No local files" />
+                        <TextBlock
+                            x:Name="PlaylistEmptyHint"
+                            HorizontalAlignment="Center"
+                            FontSize="11"
+                            Foreground="#6E6E76"
+                            Text="Open a file or drop one here" />
+                    </StackPanel>
+                    </Grid>
+                </Grid>
+            </Border>
+
+        <Border
+            x:Name="BottomBar"
+            Grid.Row="2"
+            Grid.Column="0"
+            Background="{StaticResource GrokChromeBrush}"
+            BorderBrush="{StaticResource GrokLineBrush}"
+            BorderThickness="0,1,0,0"
+            Padding="10,8,10,8"
+            PointerEntered="BottomBar_PointerEntered"
+            PointerExited="BottomBar_PointerExited"
+            PointerPressed="EmptyArea_PointerPressed"
+            RightTapped="EmptyArea_RightTapped">
+            <Border.RenderTransform>
+                <TranslateTransform x:Name="BottomBarSlide" />
+            </Border.RenderTransform>
+            <Grid Background="Transparent">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <controls:ArrowCursorHost Margin="0,0,10,0">
+                        <Rectangle
+                            Height="3"
+                            VerticalAlignment="Center"
+                            Fill="#FF2A2A30"
+                            IsHitTestVisible="False" />
+                        <Rectangle
+                            x:Name="CacheFill"
+                            Height="3"
+                            HorizontalAlignment="Left"
+                            VerticalAlignment="Center"
+                            Fill="#38F0C93A"
+                            IsHitTestVisible="False"
+                            Width="0" />
+                        <Slider x:Name="SeekSlider" Style="{StaticResource SquareSlider}" Background="Transparent" IsEnabled="False" Maximum="1" Minimum="0" StepFrequency="0.1" Value="0" SizeChanged="SeekSlider_SizeChanged" />
+                        <Canvas x:Name="AbMarkLayer" IsHitTestVisible="False">
+                            <Rectangle
+                                x:Name="LoopAMark"
+                                Width="2"
+                                Height="16"
+                                Fill="{StaticResource GrokAccentBrush}"
+                                Visibility="Collapsed" />
+                            <Rectangle
+                                x:Name="LoopBMark"
+                                Width="2"
+                                Height="16"
+                                Fill="{StaticResource GrokPinkBrush}"
+                                Visibility="Collapsed" />
+                        </Canvas>
+                    </controls:ArrowCursorHost>
+                    <Rectangle Grid.Column="1" Width="1" Height="18" Fill="{StaticResource GrokLineBrush}" Margin="4,0" />
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" Width="160">
+                        <Button x:Name="MuteButton" Style="{StaticResource TransportIconButton}" Click="MuteButton_Click" ToolTipService.ToolTip="Mute">
+                            <FontIcon x:Name="VolumeIcon" FontSize="14" Glyph="&#xE767;" />
+                        </Button>
+                        <Slider x:Name="VolumeSlider" Style="{StaticResource SquareSlider}" Width="112" Maximum="100" Minimum="0" Value="100" VerticalAlignment="Center" />
+                    </StackPanel>
+                </Grid>
+
+                <Grid Grid.Row="1" Background="Transparent" Margin="0,6,0,0">
+                    <StackPanel Orientation="Horizontal">
+                        <Button
+                            x:Name="LiveButton"
+                            Click="LiveButton_Click"
+                            Style="{StaticResource TransportIconButton}"
+                            ToolTipService.ToolTip="Go to live"
+                            Visibility="Collapsed"
+                            Width="64">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <Ellipse
+                                    x:Name="LiveDot"
+                                    Width="8"
+                                    Height="8"
+                                    Fill="#FFE24A4A" />
+                                <TextBlock
+                                    x:Name="LiveLabel"
+                                    VerticalAlignment="Center"
+                                    FontSize="12"
+                                    FontWeight="SemiBold"
+                                    Foreground="{StaticResource GrokAccentBrush}"
+                                    Text="LIVE" />
+                            </StackPanel>
+                        </Button>
+                        <Button x:Name="PlayPauseButton" Style="{StaticResource TransportIconButton}" Click="PlayPauseButton_Click" IsEnabled="False" ToolTipService.ToolTip="Play">
+                            <FontIcon x:Name="PlayPauseIcon" FontSize="16" Glyph="&#xE768;" />
+                        </Button>
+                        <Rectangle x:Name="PlayStopSplit" Width="1" Height="16" Fill="{StaticResource GrokLineBrush}" Margin="6,0" />
+                        <Button x:Name="StopButton" Style="{StaticResource TransportIconButton}" Click="StopButton_Click" ToolTipService.ToolTip="Stop">
+                            <FontIcon FontSize="14" Glyph="&#xE71A;" />
+                        </Button>
+                        <Rectangle Width="1" Height="16" Fill="{StaticResource GrokLineBrush}" Margin="6,0" />
+                        <Button x:Name="RewindButton" Style="{StaticResource TransportIconButton}" Click="RewindButton_Click" ToolTipService.ToolTip="Back 5 seconds">
+                            <FontIcon FontSize="14" Glyph="&#xE76B;" />
+                        </Button>
+                        <Rectangle Width="1" Height="16" Fill="{StaticResource GrokLineBrush}" Margin="6,0" />
+                        <Button x:Name="ForwardButton" Style="{StaticResource TransportIconButton}" Click="ForwardButton_Click" ToolTipService.ToolTip="Forward 5 seconds">
+                            <FontIcon FontSize="14" Glyph="&#xE76C;" />
+                        </Button>
+                        <Rectangle Width="1" Height="16" Fill="{StaticResource GrokLineBrush}" Margin="6,0" />
+                        <Button x:Name="OpenButton" Style="{StaticResource TransportIconButton}" Click="OpenButton_Click" ToolTipService.ToolTip="Open">
+                            <FontIcon FontSize="14" Glyph="&#xE8E5;" />
+                        </Button>
+                        <Rectangle Width="1" Height="16" Fill="{StaticResource GrokLineBrush}" Margin="6,0" />
+                        <StackPanel Margin="8,0,8,0" Orientation="Horizontal" VerticalAlignment="Center">
+                            <controls:HandCursorHost
+                                x:Name="PositionTimeHost"
+                                PointerEntered="PositionTime_PointerEntered"
+                                PointerExited="PositionTime_PointerExited"
+                                PointerReleased="PositionTime_PointerReleased">
+                                <TextBlock
+                                    x:Name="PositionTimeText"
+                                    FontFamily="Cascadia Mono, Consolas"
+                                    FontSize="13"
+                                    Foreground="{StaticResource GrokMutedBrush}"
+                                    Text="00:00:00" />
+                            </controls:HandCursorHost>
+                            <TextBlock
+                                x:Name="DurationSlash"
+                                Margin="6,0"
+                                FontFamily="Cascadia Mono, Consolas"
+                                FontSize="13"
+                                Foreground="#66707078"
+                                IsHitTestVisible="False"
+                                Text="/" />
+                            <TextBlock
+                                x:Name="DurationTimeText"
+                                FontFamily="Cascadia Mono, Consolas"
+                                FontSize="13"
+                                Foreground="#66707078"
+                                IsHitTestVisible="False"
+                                Text="00:00:00" />
+                        </StackPanel>
+                        <Button x:Name="LoopButton" Style="{StaticResource TransportIconButton}" Click="LoopButton_Click" ToolTipService.ToolTip="No loop">
+                            <FontIcon x:Name="LoopIcon" FontSize="14" Glyph="&#xE8EE;" />
+                        </Button>
+                    </StackPanel>
+                    <StackPanel HorizontalAlignment="Right" Orientation="Horizontal">
+                        <Button x:Name="ControlPanelButton" Style="{StaticResource TransportIconButton}" Click="ControlPanelButton_Click" ToolTipService.ToolTip="Control panel">
+                            <FontIcon x:Name="ControlPanelIcon" FontSize="14" Glyph="&#xE90F;" />
+                        </Button>
+                        <Rectangle Width="1" Height="16" Fill="{StaticResource GrokLineBrush}" Margin="6,0" />
+                        <Button x:Name="PlaylistButton" Style="{StaticResource TransportIconButton}" Click="PlaylistButton_Click" ToolTipService.ToolTip="Playlist">
+                            <FontIcon FontSize="14" Glyph="&#xE8FD;" />
+                        </Button>
+                    </StackPanel>
+                </Grid>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

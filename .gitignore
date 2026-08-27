@@ -1,0 +1,37 @@
+# Build
+bin/
+obj/
+.vs/
+dist/
+*.user
+*.suo
+TestResults/
+testdata/generated/
+
+# Native binaries (restore with tools/fetch-libmpv.ps1)
+native/libmpv/*.dll
+native/libmpv/*.a
+native/libmpv/*.lib
+tools/7zr.exe
+
+# Chrome probe profiles and dumps (cookies, Trust Tokens, login data)
+tools/extension-probe/chrome-profile*/
+tools/**/chrome-profile*/
+tools/extension-probe/last-dump.json
+tools/extension-probe/live-captions.json
+tools/extension-probe/live-resolve.json
+tools/tools/
+
+# Published as its own repo
+extension/
+
+# Secrets / local
+.env
+.env.*
+*.pem
+*.pfx
+*.p12
+*.key
+id_rsa
+id_ed25519
+secrets/

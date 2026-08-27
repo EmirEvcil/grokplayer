@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<UserControl
+    x:Class="Grok.Player.App.DownloadPreferencesPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer
+        Padding="16,14,16,16"
+        HorizontalScrollBarVisibility="Disabled"
+        VerticalScrollBarVisibility="Auto">
+        <Border
+            Background="{StaticResource GrokChromeBrush}"
+            BorderBrush="{StaticResource GrokLineBrush}"
+            BorderThickness="1">
+            <StackPanel Margin="14,12" Spacing="12">
+                <TextBlock
+                    FontSize="13"
+                    FontWeight="SemiBold"
+                    Foreground="{StaticResource GrokAccentBrush}"
+                    Text="Downloads" />
+                <TextBlock
+                    FontSize="12"
+                    Foreground="{StaticResource GrokMutedBrush}"
+                    Text="VOD downloads only. Live streams cannot be saved."
+                    TextWrapping="Wrap" />
+                <TextBlock FontSize="13" Foreground="{StaticResource GrokMutedBrush}" Text="Save to" />
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox
+                        x:Name="FolderBox"
+                        Height="32"
+                        Padding="8,4"
+                        CornerRadius="0"
+                        FontSize="12"
+                        LostFocus="FolderBox_LostFocus" />
+                    <Button
+                        Grid.Column="1"
+                        Height="32"
+                        Padding="12,0"
+                        Click="Browse_Click"
+                        Content="Browse"
+                        Style="{StaticResource SubBarButton}" />
+                </Grid>
+                <TextBlock FontSize="13" Foreground="{StaticResource GrokMutedBrush}" Text="Resolution" />
+                <ComboBox
+                    x:Name="HeightBox"
+                    MinHeight="32"
+                    HorizontalAlignment="Stretch"
+                    CornerRadius="0"
+                    FontSize="12"
+                    SelectionChanged="HeightBox_SelectionChanged" />
+                <TextBlock FontSize="13" Foreground="{StaticResource GrokMutedBrush}" Text="File type" />
+                <ComboBox
+                    x:Name="ContainerBox"
+                    MinHeight="32"
+                    HorizontalAlignment="Stretch"
+                    CornerRadius="0"
+                    FontSize="12"
+                    SelectionChanged="ContainerBox_SelectionChanged" />
+                <TextBlock FontSize="13" Foreground="{StaticResource GrokMutedBrush}" Text="Automatic parallel downloads" />
+                <ComboBox
+                    x:Name="ParallelBox"
+                    MinHeight="32"
+                    HorizontalAlignment="Stretch"
+                    CornerRadius="0"
+                    FontSize="12"
+                    SelectionChanged="ParallelBox_SelectionChanged" />
+            </StackPanel>
+        </Border>
+    </ScrollViewer>
+</UserControl>

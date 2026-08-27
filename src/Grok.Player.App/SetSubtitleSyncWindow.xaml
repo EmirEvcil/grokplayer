@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Window
+    x:Class="Grok.Player.App.SetSubtitleSyncWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Set subtitle sync">
+    <Grid
+        x:Name="Root"
+        Background="#FF101012"
+        PointerMoved="EmptyArea_PointerMoved"
+        PointerPressed="EmptyArea_PointerPressed"
+        PointerReleased="EmptyArea_PointerReleased"
+        PointerCaptureLost="EmptyArea_PointerReleased">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="40" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="56" />
+        </Grid.RowDefinitions>
+
+        <Grid
+            Background="{StaticResource GrokChromeBrush}"
+            BorderBrush="{StaticResource GrokLineBrush}"
+            BorderThickness="0,0,0,1">
+            <Grid
+                x:Name="TitleDrag"
+                Background="Transparent">
+                <TextBlock
+                    Margin="12,0,8,0"
+                    VerticalAlignment="Center"
+                    FontSize="13"
+                    FontWeight="SemiBold"
+                    Foreground="{StaticResource GrokAccentBrush}"
+                    Text="Set subtitle sync" />
+            </Grid>
+        </Grid>
+
+        <Grid
+            Grid.Row="1"
+            Margin="16,18,16,16"
+            ColumnSpacing="10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <TextBlock
+                MinWidth="78"
+                VerticalAlignment="Center"
+                FontSize="13"
+                Foreground="{StaticResource GrokMutedBrush}"
+                Text="Sync value" />
+            <NumberBox
+                x:Name="SyncBox"
+                Grid.Column="1"
+                MinWidth="180"
+                MinHeight="36"
+                VerticalAlignment="Center"
+                LargeChange="0.5"
+                Maximum="3600"
+                Minimum="-3600"
+                SmallChange="0.1"
+                SpinButtonPlacementMode="Inline"
+                Value="0" />
+            <Button
+                Grid.Column="2"
+                MinWidth="72"
+                MinHeight="36"
+                Padding="14,6"
+                VerticalAlignment="Center"
+                Click="Apply_Click"
+                Content="Apply"
+                Style="{StaticResource SubBarButton}" />
+        </Grid>
+
+        <Border
+            Grid.Row="2"
+            Height="1"
+            Background="{StaticResource GrokLineBrush}" />
+
+        <StackPanel
+            Grid.Row="3"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Orientation="Horizontal"
+            Spacing="10">
+            <Button
+                Width="88"
+                Height="30"
+                Click="Ok_Click"
+                Content="OK"
+                CornerRadius="0" />
+            <Button
+                Width="88"
+                Height="30"
+                Click="Cancel_Click"
+                Content="Cancel"
+                CornerRadius="0" />
+        </StackPanel>
+    </Grid>
+</Window>

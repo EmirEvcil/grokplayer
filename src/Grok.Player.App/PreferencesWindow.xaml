@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Window
+    x:Class="Grok.Player.App.PreferencesWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Grok.Player.App"
+    Title="Preferences">
+    <Grid
+        x:Name="Root"
+        Background="#FF101012"
+        PointerMoved="EmptyArea_PointerMoved"
+        PointerPressed="EmptyArea_PointerPressed"
+        PointerReleased="EmptyArea_PointerReleased"
+        PointerCaptureLost="EmptyArea_PointerReleased">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="40" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Grid
+            Background="{StaticResource GrokChromeBrush}"
+            BorderBrush="{StaticResource GrokLineBrush}"
+            BorderThickness="0,0,0,1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Grid
+                x:Name="TitleDrag"
+                Background="Transparent">
+                <StackPanel
+                    Margin="12,0,8,0"
+                    VerticalAlignment="Center"
+                    Orientation="Horizontal"
+                    Spacing="8">
+                    <Image
+                        Width="16"
+                        Height="16"
+                        Source="Assets/Logo.jpg"
+                        Stretch="Uniform" />
+                    <TextBlock
+                        VerticalAlignment="Center"
+                        FontSize="13"
+                        FontWeight="SemiBold"
+                        Foreground="{StaticResource GrokAccentBrush}"
+                        Text="Preferences" />
+                </StackPanel>
+            </Grid>
+            <StackPanel
+                x:Name="ChromeButtons"
+                Grid.Column="1"
+                Orientation="Horizontal">
+                <Button
+                    x:Name="PinButton"
+                    Click="Pin_Click"
+                    Style="{StaticResource ChromeButton}"
+                    ToolTipService.ToolTip="Keep above player">
+                    <FontIcon x:Name="PinIcon" FontSize="12" Glyph="&#xE840;" />
+                </Button>
+                <Button
+                    Click="Close_Click"
+                    Style="{StaticResource ChromeButton}"
+                    ToolTipService.ToolTip="Close">
+                    <FontIcon FontSize="12" Glyph="&#xE8BB;" />
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <Grid
+            x:Name="BodyHost"
+            Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="248" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Border
+                Background="{StaticResource GrokChromeBrush}"
+                BorderBrush="{StaticResource GrokLineBrush}"
+                BorderThickness="0,0,1,0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <ComboBox
+                        x:Name="PresetBox"
+                        MinHeight="32"
+                        Margin="10,10,10,0"
+                        HorizontalAlignment="Stretch"
+                        CornerRadius="0"
+                        FontSize="12" />
+                    <TextBox
+                        x:Name="SearchBox"
+                        Grid.Row="1"
+                        Height="28"
+                        Margin="10,8,10,8"
+                        Padding="8,3"
+                        CornerRadius="0"
+                        FontSize="12"
+                        PlaceholderText="Search settings"
+                        TextChanged="SearchBox_TextChanged" />
+                    <ScrollViewer
+                        Grid.Row="2"
+                        Margin="4,0,4,8"
+                        HorizontalScrollBarVisibility="Disabled"
+                        VerticalScrollBarVisibility="Auto">
+                        <StackPanel x:Name="NavHost" Spacing="0" />
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+
+            <Grid Grid.Column="1" Background="{StaticResource GrokPanelBrush}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="32" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <ScrollViewer
+                    x:Name="TabScroller"
+                    HorizontalScrollBarVisibility="Hidden"
+                    HorizontalScrollMode="Enabled"
+                    VerticalScrollBarVisibility="Disabled"
+                    VerticalScrollMode="Disabled"
+                    PointerMoved="TabStrip_PointerMoved"
+                    PointerPressed="TabStrip_PointerPressed"
+                    PointerReleased="TabStrip_PointerReleased"
+                    PointerCaptureLost="TabStrip_PointerReleased">
+                    <Grid
+                        x:Name="SectionTabs"
+                        MinHeight="32"
+                        Background="{StaticResource GrokChromeBrush}" />
+                </ScrollViewer>
+                <Border
+                    x:Name="SectionBody"
+                    Grid.Row="1"
+                    Background="{StaticResource GrokPanelBrush}">
+                    <Grid>
+                        <TextBlock
+                            x:Name="SectionPlaceholder"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            FontSize="13"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="General" />
+                        <local:ResizePreferencesPanel
+                            x:Name="ResizePanel"
+                            Visibility="Collapsed" />
+                        <local:DownloadPreferencesPanel
+                            x:Name="DownloadPanel"
+                            Visibility="Collapsed" />
+                    </Grid>
+                </Border>
+            </Grid>
+        </Grid>
+    </Grid>
+</Window>

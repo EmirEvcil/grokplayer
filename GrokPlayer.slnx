@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Grok.Player.App/Grok.Player.App.csproj" />
+    <Project Path="src/Grok.Player.Core.IntegrationTests/Grok.Player.Core.IntegrationTests.csproj" />
+    <Project Path="src/Grok.Player.Core.Tests/Grok.Player.Core.Tests.csproj" />
+    <Project Path="src/Grok.Player.Core/Grok.Player.Core.csproj" />
+  </Folder>
+</Solution>

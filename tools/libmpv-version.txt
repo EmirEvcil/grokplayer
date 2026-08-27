@@ -1,0 +1,6 @@
+source=zhongfly/mpv-winbuild
+tag=2026-08-16-e034d612cf
+asset=mpv-dev-lgpl-x86_64-20260816-git-e034d612cf.7z
+url=https://github.com/zhongfly/mpv-winbuild/releases/download/2026-08-16-e034d612cf/mpv-dev-lgpl-x86_64-20260816-git-e034d612cf.7z
+license=LGPLv2.1+
+notes=hwdec=d3d11va, vo=gpu-next, gpu-api=d3d11
