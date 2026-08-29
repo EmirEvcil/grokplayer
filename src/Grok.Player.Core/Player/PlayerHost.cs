@@ -33,12 +33,14 @@ public sealed class PlayerHost : IDisposable
     private string? _subLang;
     private string? _extraAudio;
     private string? _pendingSubFile;
+    private bool _wantMuted;
     private bool _styledSubtitle;
     private string _subtitleFont = "Segoe UI";
     private double _subtitleFontSize = 55;
     private int _subtitleShift;
     private int _langSelectLeft;
     private int _mediaRevision;
+    private bool _durationFromDemuxer;
 
     public PlayerHost(IMpvNative mpv, PlayerHostOptions? options = null, bool ownsNative = true)
     {
@@ -140,7 +142,7 @@ public sealed class PlayerHost : IDisposable
 
     public void Open(string path) => Open(path, StreamKind.Unknown);
 
-    public void Open(string path, StreamKind kind, string? audioUrl = null, string? title = null, string? userAgent = null, string? audioLang = null, string? subLang = null, string? subFile = null)
+    public void Open(string path, StreamKind kind, string? audioUrl = null, string? title = null, string? userAgent = null, string? audioLang = null, string? subLang = null, string? subFile = null, string? referer = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         EnsureNotDisposed();
@@ -179,10 +181,11 @@ public sealed class PlayerHost : IDisposable
             IsFollowingLive = false;
             Position = TimeSpan.Zero;
             Duration = null;
+            _durationFromDemuxer = false;
             SetState_NoLock(PlayerState.Opening);
         }
 
-        ApplyOpenProfile(trimmed, kind, userAgent);
+        ApplyOpenProfile(trimmed, kind, userAgent, referer);
         if (!string.IsNullOrWhiteSpace(_extraAudio))
         {
             TrySetProperty("audio-files", _extraAudio);
@@ -208,7 +211,7 @@ public sealed class PlayerHost : IDisposable
             TrySetProperty("alang", _audioLang + ",en");
         }
 
-        if (!string.IsNullOrWhiteSpace(subFile) && File.Exists(subFile))
+        if (kind == StreamKind.Live || (!string.IsNullOrWhiteSpace(subFile) && File.Exists(subFile)))
         {
             TrySetProperty("slang", "no");
         }
@@ -500,14 +503,14 @@ public sealed class PlayerHost : IDisposable
     public void SetMuted(bool muted)
     {
         EnsureNotDisposed();
+        _wantMuted = muted;
         if (muted)
         {
             SilenceOutput();
         }
         else
         {
-            TrySetProperty("ao-volume", "100");
-            _mpv.SetPropertyFlag("mute", false);
+            RestoreOutput();
         }
 
         lock (_gate)
@@ -516,6 +519,32 @@ public sealed class PlayerHost : IDisposable
         }
 
         Raise(VolumeChanged);
+    }
+
+    private void ApplyDesiredAudio()
+    {
+        if (_wantMuted || Volume <= 0)
+        {
+            SilenceOutput();
+            lock (_gate)
+            {
+                IsMuted = true;
+            }
+
+            return;
+        }
+
+        RestoreOutput();
+        lock (_gate)
+        {
+            IsMuted = false;
+        }
+    }
+
+    private void RestoreOutput()
+    {
+        TrySetProperty("ao-volume", "100");
+        _mpv.SetPropertyFlag("mute", false);
     }
 
     private void SilenceOutput()
@@ -536,6 +565,26 @@ public sealed class PlayerHost : IDisposable
     }
 
     public void ToggleMute() => SetMuted(!IsMuted);
+
+    public void HintDuration(TimeSpan duration)
+    {
+        if (duration <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            if (Duration is { } known && known > TimeSpan.Zero)
+            {
+                return;
+            }
+
+            Duration = duration;
+        }
+
+        Raise(DurationChanged);
+    }
 
     public void SetEqualizer(bool enabled, IReadOnlyList<double> uiGains)
     {
@@ -1228,6 +1277,11 @@ public sealed class PlayerHost : IDisposable
         {
             _mediaRevision++;
             Duration = duration;
+            if (duration is { } opened && opened > TimeSpan.Zero)
+            {
+                _durationFromDemuxer = true;
+            }
+
             IsPaused = paused;
             if (!string.IsNullOrWhiteSpace(title) && !KeepsDisplayTitle(MediaTitle))
             {
@@ -1238,7 +1292,6 @@ public sealed class PlayerHost : IDisposable
 
             HwdecCurrent = hwdec;
             Position = position;
-            IsMuted = _mpv.GetPropertyFlag("mute") ?? false;
             HasVideo = ReadHasVideo(HasVideo);
             FileFormat = _mpv.GetPropertyString("file-format");
             IsSeekable = _mpv.GetPropertyFlag("seekable") ?? true;
@@ -1267,6 +1320,7 @@ public sealed class PlayerHost : IDisposable
             SetState_NoLock(paused ? PlayerState.Paused : PlayerState.Playing);
         }
 
+        ApplyDesiredAudio();
         SelectLanguageTracks();
         SelectAttachedAudio();
         if (!string.IsNullOrWhiteSpace(_pendingSubFile))
@@ -1320,7 +1374,7 @@ public sealed class PlayerHost : IDisposable
 
             lock (_gate)
             {
-                if (Duration is { } duration)
+                if (Duration is { } duration && (_durationFromDemuxer || Position > TimeSpan.FromMilliseconds(250)))
                 {
                     Position = duration;
                 }
@@ -1389,6 +1443,7 @@ public sealed class PlayerHost : IDisposable
                     lock (_gate)
                     {
                         Duration = TimeSpan.FromSeconds(durationSeconds);
+                        _durationFromDemuxer = true;
                         BumpLiveEdge_NoLock(durationSeconds);
                     }
 
@@ -1456,9 +1511,15 @@ public sealed class PlayerHost : IDisposable
             case "mute":
                 if (ev.PropertyValue is bool muted)
                 {
+                    if (!_wantMuted && muted && Volume > 0)
+                    {
+                        RestoreOutput();
+                        break;
+                    }
+
                     lock (_gate)
                     {
-                        IsMuted = muted;
+                        IsMuted = muted || _wantMuted;
                     }
 
                     Raise(VolumeChanged);
@@ -1590,10 +1651,12 @@ public sealed class PlayerHost : IDisposable
         }
     }
 
-    private void ApplyOpenProfile(string path, StreamKind kind, string? userAgent = null)
+    private void ApplyOpenProfile(string path, StreamKind kind, string? userAgent = null, string? referer = null)
     {
         var hlsFile = path.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ||
-                      path.EndsWith(".m3u", StringComparison.OrdinalIgnoreCase);
+                      path.EndsWith(".m3u", StringComparison.OrdinalIgnoreCase) ||
+                      path.Contains("master.txt", StringComparison.OrdinalIgnoreCase) ||
+                      path.Contains("playlist.txt", StringComparison.OrdinalIgnoreCase);
         var url = UrlSanitizer.IsUrl(path) || hlsFile;
         var extProgressive = url && StreamProbe.Extension(path) is ".mp4" or ".mkv" or ".webm" or ".mov" or ".m4v" or ".avi";
         var youtube = LooksLikeYouTubeMedia(path);
@@ -1604,8 +1667,20 @@ public sealed class PlayerHost : IDisposable
             _ => !extProgressive && !youtube
         };
 
-        ApplyNetworkIdentity(path, userAgent);
+        ApplyNetworkIdentity(path, userAgent, referer);
         TrySetProperty("force-seekable", live ? "no" : "yes");
+        if (!live &&
+            (path.Contains("tiktok", StringComparison.OrdinalIgnoreCase) ||
+             path.Contains("byteoversea", StringComparison.OrdinalIgnoreCase) ||
+             path.Contains("musical.ly", StringComparison.OrdinalIgnoreCase) ||
+             path.Contains("instagram", StringComparison.OrdinalIgnoreCase) ||
+             path.Contains("cdninstagram", StringComparison.OrdinalIgnoreCase) ||
+             path.Contains("fbcdn.net", StringComparison.OrdinalIgnoreCase) ||
+             path.Contains("scontent", StringComparison.OrdinalIgnoreCase)))
+        {
+            TrySetProperty("demuxer-lavf-analyzeduration", "10");
+            TrySetProperty("demuxer-lavf-probesize", "8388608");
+        }
         if (live)
         {
             // Start at the live edge (not the oldest DVR segment). Keep a few
@@ -1815,7 +1890,7 @@ public sealed class PlayerHost : IDisposable
         title is not ("videoplayback" or "watch" or "live" or "GrokPlayer") &&
         !UrlSanitizer.IsUrl(title);
 
-    private void ApplyNetworkIdentity(string path, string? userAgent)
+    private void ApplyNetworkIdentity(string path, string? userAgent, string? referer = null)
     {
         if (LooksLikeYouTubeMedia(path))
         {
@@ -1829,9 +1904,19 @@ public sealed class PlayerHost : IDisposable
             return;
         }
 
-        TrySetProperty("user-agent", "Mozilla/5.0 GrokPlayer/1.0");
-        TrySetProperty("referrer", "");
-        TrySetProperty("http-header-fields", "");
+        if (!UrlSanitizer.IsUrl(path))
+        {
+            TrySetProperty("user-agent", "Mozilla/5.0 GrokPlayer/1.0");
+            TrySetProperty("referrer", "");
+            TrySetProperty("http-header-fields", "");
+            return;
+        }
+
+        var page = StreamCatalog.SiteReferer(path, referer);
+        var origin = StreamCatalog.PageOrigin(page) ?? StreamCatalog.PageOrigin(path) ?? page;
+        TrySetProperty("user-agent", string.IsNullOrWhiteSpace(userAgent) ? StreamCatalog.ChromeUa : userAgent);
+        TrySetProperty("referrer", page);
+        TrySetProperty("http-header-fields", "Referer: " + page + ",Origin: " + origin.TrimEnd('/'));
     }
 
     private static bool LooksLikeYouTubeMedia(string path) =>

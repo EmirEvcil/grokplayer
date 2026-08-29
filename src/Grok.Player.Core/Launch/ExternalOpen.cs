@@ -4,7 +4,7 @@ namespace Grok.Player.Core.Launch;
 
 public sealed class ExternalOpen
 {
-    public ExternalOpen(string url, string? title = null, StreamKind kind = StreamKind.Unknown, bool play = true, string? audioLang = null, string? subLang = null, int height = 0, string? captionUrl = null)
+    public ExternalOpen(string url, string? title = null, StreamKind kind = StreamKind.Unknown, bool play = true, string? audioLang = null, string? subLang = null, int height = 0, string? captionUrl = null, string? referer = null, double? durationSeconds = null, string? soundtrack = null)
     {
         Url = url;
         Title = title;
@@ -14,6 +14,9 @@ public sealed class ExternalOpen
         SubLang = subLang;
         Height = height;
         CaptionUrl = captionUrl;
+        Referer = referer;
+        DurationSeconds = durationSeconds is > 0 and < 86400 ? durationSeconds : null;
+        Soundtrack = string.IsNullOrWhiteSpace(soundtrack) ? null : soundtrack.Trim();
     }
 
     public string Url { get; }
@@ -26,6 +29,12 @@ public sealed class ExternalOpen
     public int Height { get; }
 
     public string? CaptionUrl { get; }
+
+    public string? Referer { get; }
+
+    public double? DurationSeconds { get; }
+
+    public string? Soundtrack { get; }
 
     public static bool TryParse(string? raw, out ExternalOpen open)
     {
@@ -50,7 +59,7 @@ public sealed class ExternalOpen
         return false;
     }
 
-    public static string ToProtocol(string url, string? title = null, StreamKind kind = StreamKind.Unknown, string? audioLang = null, string? subLang = null, int height = 0, string? captionUrl = null)
+    public static string ToProtocol(string url, string? title = null, StreamKind kind = StreamKind.Unknown, string? audioLang = null, string? subLang = null, int height = 0, string? captionUrl = null, string? referer = null, double? durationSeconds = null, string? soundtrack = null)
     {
         var query = "url=" + Uri.EscapeDataString(url);
         if (!string.IsNullOrWhiteSpace(title))
@@ -83,6 +92,21 @@ public sealed class ExternalOpen
             query += "&caption=" + Uri.EscapeDataString(captionUrl);
         }
 
+        if (!string.IsNullOrWhiteSpace(referer))
+        {
+            query += "&page=" + Uri.EscapeDataString(referer);
+        }
+
+        if (durationSeconds is > 0 and < 86400)
+        {
+            query += "&duration=" + durationSeconds.Value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        if (!string.IsNullOrWhiteSpace(soundtrack))
+        {
+            query += "&sound=" + Uri.EscapeDataString(soundtrack);
+        }
+
         return "grokplayer://open?" + query;
     }
 
@@ -111,9 +135,12 @@ public sealed class ExternalOpen
         string? audioLang = null;
         string? subLang = null;
         string? captionUrl = null;
+        string? referer = null;
+        string? soundtrack = null;
         var kind = StreamKind.Unknown;
         var play = true;
         var height = 0;
+        double? durationSeconds = null;
         foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
         {
             var parts = pair.Split('=', 2);
@@ -153,12 +180,29 @@ public sealed class ExternalOpen
             {
                 captionUrl = string.IsNullOrWhiteSpace(value) ? null : value.Trim();
             }
+            else if (name is "page" or "referer" or "referrer")
+            {
+                referer = string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+            }
             else if (name is "height" or "quality" or "res")
             {
                 if (int.TryParse(value.TrimEnd('p', 'P'), System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsed))
                 {
                     height = Download.HlsPlaylist.NormalizeHeight(parsed);
                 }
+            }
+            else if (name is "duration" or "length")
+            {
+                if (double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds) &&
+                    seconds > 0 &&
+                    seconds < 86400)
+                {
+                    durationSeconds = seconds;
+                }
+            }
+            else if (name is "sound" or "soundtrack" or "audioUrl")
+            {
+                soundtrack = string.IsNullOrWhiteSpace(value) ? null : value.Trim();
             }
         }
 
@@ -167,7 +211,7 @@ public sealed class ExternalOpen
             return false;
         }
 
-        open = new ExternalOpen(url, title, kind, play, audioLang, subLang, height, captionUrl);
+        open = new ExternalOpen(url, title, kind, play, audioLang, subLang, height, captionUrl, referer, durationSeconds, soundtrack);
         return true;
     }
 }

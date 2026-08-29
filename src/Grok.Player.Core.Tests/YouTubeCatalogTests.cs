@@ -41,6 +41,26 @@ public sealed class YouTubeCatalogTests
     }
 
     [Fact]
+    public void Live_adaptive_only_json_is_not_playable()
+    {
+        var json =
+            """
+            {"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"abcdefghijk","title":"News","isLive":true},"streamingData":{"adaptiveFormats":[{"url":"https://googlevideo.com/videoplayback?id=137","width":1920,"mimeType":"video/mp4"}]}}
+            """;
+        Assert.Null(YouTubeCatalog.ParsePlayerResponse(json));
+    }
+
+    [Fact]
+    public void Live_dash_only_json_is_not_playable()
+    {
+        var json =
+            """
+            {"playabilityStatus":{"status":"OK"},"videoDetails":{"videoId":"abcdefghijk","title":"News","isLive":true},"streamingData":{"dashManifestUrl":"https://manifest.googlevideo.com/api/manifest/dash/live.mpd"}}
+            """;
+        Assert.Null(YouTubeCatalog.ParsePlayerResponse(json));
+    }
+
+    [Fact]
     public void Parses_vod_progressive_url()
     {
         var json =

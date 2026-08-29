@@ -465,6 +465,25 @@ public sealed class SeekPreviewTests
         }
     }
 
+    [Fact]
+    public void Vod_hls_preview_does_not_use_live_demuxer()
+    {
+        var fake = new FakeMpvNative();
+        using var engine = new SeekPreviewEngine(fake);
+        engine.Prepare("https://stream.kick.com/vod/master.m3u8");
+        Assert.DoesNotContain(fake.Lifecycle, item => item.Contains("live_start_index=-1", StringComparison.Ordinal));
+        Assert.Contains(fake.Lifecycle, item => item.Contains("referrer=https://kick.com/", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Network_preview_sends_site_referer()
+    {
+        var fake = new FakeMpvNative();
+        using var engine = new SeekPreviewEngine(fake);
+        engine.Prepare("https://v16-webapp.tiktokcdn.com/video/tos/foo");
+        Assert.Contains(fake.Lifecycle, item => item.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase));
+    }
+
     private sealed class RecordingRenderer : ISeekPreviewRenderer
     {
         public List<TimeSpan> Times { get; } = [];

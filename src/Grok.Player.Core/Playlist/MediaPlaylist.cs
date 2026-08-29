@@ -50,6 +50,8 @@ public sealed class PlaylistItem
 
     public string? UserAgent { get; set; }
 
+    public string? Referer { get; set; }
+
     public string? CaptionUrl { get; set; }
 
     public int CachedHeight { get; set; }
@@ -68,6 +70,7 @@ public sealed class PlaylistItem
         MediaUrl = playable.MediaUrl;
         AudioUrl = playable.AudioUrl;
         UserAgent = playable.UserAgent;
+        Referer = playable.Referer;
         CaptionUrl = playable.CaptionUrl;
         StreamKind = playable.Kind;
         CachedHeight = height;
@@ -96,6 +99,7 @@ public sealed class PlaylistItem
         MediaUrl = null;
         AudioUrl = null;
         UserAgent = null;
+        Referer = null;
         CaptionUrl = null;
         CachedHeight = 0;
         CachedAudioLang = null;

@@ -64,6 +64,28 @@ public sealed class PlayerHostVolumeTests
     }
 
     [Fact]
+    public void File_load_restores_audio_when_the_user_is_unmuted()
+    {
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        var path = Grok.Player.Core.Tests.Support.TestMedia.CreateTempFile();
+        try
+        {
+            host.SetMuted(true);
+            host.SetMuted(false);
+            host.Open(path);
+            host.ProcessPendingEvents();
+            Assert.False(host.IsMuted);
+            Assert.Contains(fake.Lifecycle, item => item == "property:ao-volume=100");
+            Assert.Contains(fake.Lifecycle, item => item == "property:mute=False");
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void Custom_initial_volume_is_applied_at_construction()
     {
         var fake = new FakeMpvNative();

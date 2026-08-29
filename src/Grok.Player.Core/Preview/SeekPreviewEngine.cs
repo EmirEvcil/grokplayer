@@ -1,4 +1,5 @@
 using System.Globalization;
+using Grok.Player.Core.Media;
 using Grok.Player.Core.Native;
 
 namespace Grok.Player.Core.Preview;
@@ -49,18 +50,10 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer, IExactSeekPreviewR
         _path = path;
         _ready = false;
         ApplyNetworkIdentity(path);
-        var liveHls = path.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ||
-                      path.EndsWith(".m3u", StringComparison.OrdinalIgnoreCase);
-        if (liveHls)
-        {
-            TrySet("demuxer-lavf-o", "live_start_index=-1,allowed_extensions=ALL");
-            TrySet("demuxer-lavf-analyzeduration", "0.15");
-            TrySet("demuxer-lavf-probesize", "65536");
-            TrySet("hls-live-edge", "1");
-        }
+        TrySet("demuxer-lavf-o", "allowed_extensions=ALL");
         _mpv.Command("loadfile", path, "replace");
         _mpv.SetPropertyFlag("pause", true);
-        var wait = youtube ? 3.5 : liveHls ? 8.0 : path.Contains("://", StringComparison.Ordinal) ? 2.4 : 0.8;
+        var wait = youtube ? 3.5 : path.Contains("://", StringComparison.Ordinal) ? 2.4 : 0.8;
         _ready = WaitForFile(wait);
     }
 
@@ -254,7 +247,7 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer, IExactSeekPreviewR
 
     private void ApplyNetworkIdentity(string path)
     {
-        if (!LooksLikeYouTube(path))
+        if (!UrlSanitizer.IsUrl(path))
         {
             TrySet("user-agent", ChromeUa);
             TrySet("referrer", "");
@@ -262,9 +255,11 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer, IExactSeekPreviewR
             return;
         }
 
+        var page = StreamCatalog.SiteReferer(path);
+        var origin = StreamCatalog.PageOrigin(page) ?? StreamCatalog.PageOrigin(path) ?? page;
         TrySet("user-agent", ChromeUa);
-        TrySet("referrer", "https://www.youtube.com");
-        TrySet("http-header-fields", "Referer: https://www.youtube.com,Origin: https://www.youtube.com");
+        TrySet("referrer", page);
+        TrySet("http-header-fields", "Referer: " + page + ",Origin: " + origin.TrimEnd('/'));
     }
 
     private void TrySet(string name, string value)

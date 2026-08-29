@@ -34,7 +34,7 @@ public static class StreamCaptionLoader
         var rawPath = Path.Combine(folder, stem + "." + tag + ".vtt");
         var translating = IsTranslateRequest(want, captionUrl);
         var urls = Urls(videoId, want, captionUrl);
-        if (!string.IsNullOrWhiteSpace(videoId) && want.Length > 0 && !File.Exists(captionUrl))
+        if (IsYouTubeId(videoId) && want.Length > 0 && !File.Exists(captionUrl))
             urls = urls.Concat(YouTubeCatalog.FreshCaptionUrls(videoId, want, captionUrl));
         foreach (var url in urls.Distinct(StringComparer.Ordinal))
         {
@@ -244,7 +244,7 @@ public static class StreamCaptionLoader
         }
 
         var sourceLang = MediaLanguage.Normalize(YouTubeCatalog.CaptionSourceLanguageFromUrl(captionUrl));
-        if (!string.IsNullOrWhiteSpace(videoId) && want.Length > 0 && !MediaLanguage.IsOriginal(language))
+        if (IsYouTubeId(videoId) && want.Length > 0 && !MediaLanguage.IsOriginal(language))
         {
             if (translating)
             {
@@ -394,6 +394,12 @@ public static class StreamCaptionLoader
 
         return "WEBVTT\nLanguage: " + lang + text["WEBVTT".Length..];
     }
+
+    internal static bool IsYouTubeId(string? videoId) =>
+        !string.IsNullOrWhiteSpace(videoId) &&
+        !videoId.Contains('|', StringComparison.Ordinal) &&
+        YouTubeCatalog.TryReadVideoId(videoId, out var id) &&
+        string.Equals(id, videoId, StringComparison.Ordinal);
 
     internal static bool LooksLikeCaptions(string text) =>
         text.Contains("WEBVTT", StringComparison.OrdinalIgnoreCase) ||

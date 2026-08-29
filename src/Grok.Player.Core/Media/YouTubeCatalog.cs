@@ -16,7 +16,8 @@ public sealed class YouTubePlayable
         string? subLang = null,
         string? captionUrl = null,
         bool hlsSubtitles = false,
-        string? storyboardSpec = null)
+        string? storyboardSpec = null,
+        string? referer = null)
     {
         VideoId = videoId;
         MediaUrl = mediaUrl;
@@ -29,6 +30,7 @@ public sealed class YouTubePlayable
         CaptionUrl = captionUrl;
         HlsSubtitles = hlsSubtitles;
         StoryboardSpec = storyboardSpec;
+        Referer = referer;
     }
 
     public string VideoId { get; }
@@ -44,23 +46,52 @@ public sealed class YouTubePlayable
 
     public string? StoryboardSpec { get; }
 
+    public string? Referer { get; }
+
     public YouTubePlayable WithUserAgent(string? userAgent) =>
-        new(VideoId, MediaUrl, Title, Kind, AudioUrl, userAgent, AudioLang, SubLang, CaptionUrl, HlsSubtitles, StoryboardSpec);
+        Copy(userAgent: userAgent);
 
     public YouTubePlayable WithLanguages(string? audioLang, string? subLang) =>
-        new(VideoId, MediaUrl, Title, Kind, AudioUrl, UserAgent, audioLang ?? AudioLang, subLang ?? SubLang, CaptionUrl, HlsSubtitles, StoryboardSpec);
+        Copy(audioLang: audioLang ?? AudioLang, subLang: subLang ?? SubLang);
 
     public YouTubePlayable WithCaption(string? captionUrl) =>
-        new(VideoId, MediaUrl, Title, Kind, AudioUrl, UserAgent, AudioLang, SubLang, captionUrl ?? CaptionUrl, HlsSubtitles, StoryboardSpec);
+        Copy(captionUrl: captionUrl ?? CaptionUrl);
 
     public YouTubePlayable WithHls(string? audioUrl, bool hlsSubtitles) =>
-        new(VideoId, MediaUrl, Title, Kind, audioUrl ?? AudioUrl, UserAgent, AudioLang, SubLang, CaptionUrl, hlsSubtitles, StoryboardSpec);
+        Copy(audioUrl: audioUrl ?? AudioUrl, hlsSubtitles: hlsSubtitles);
 
     public YouTubePlayable WithMedia(string mediaUrl) =>
-        new(VideoId, mediaUrl, Title, Kind, AudioUrl, UserAgent, AudioLang, SubLang, CaptionUrl, HlsSubtitles, StoryboardSpec);
+        Copy(mediaUrl: mediaUrl);
 
     public YouTubePlayable WithStoryboard(string? spec) =>
-        new(VideoId, MediaUrl, Title, Kind, AudioUrl, UserAgent, AudioLang, SubLang, CaptionUrl, HlsSubtitles, spec ?? StoryboardSpec);
+        Copy(storyboardSpec: spec ?? StoryboardSpec);
+
+    public YouTubePlayable WithReferer(string? referer) =>
+        Copy(referer: referer ?? Referer);
+
+    private YouTubePlayable Copy(
+        string? mediaUrl = null,
+        string? audioUrl = null,
+        string? userAgent = null,
+        string? audioLang = null,
+        string? subLang = null,
+        string? captionUrl = null,
+        bool? hlsSubtitles = null,
+        string? storyboardSpec = null,
+        string? referer = null) =>
+        new(
+            VideoId,
+            mediaUrl ?? MediaUrl,
+            Title,
+            Kind,
+            audioUrl ?? AudioUrl,
+            userAgent ?? UserAgent,
+            audioLang ?? AudioLang,
+            subLang ?? SubLang,
+            captionUrl ?? CaptionUrl,
+            hlsSubtitles ?? HlsSubtitles,
+            storyboardSpec ?? StoryboardSpec,
+            referer ?? Referer);
 }
 
 public static class YouTubeCatalog
@@ -175,9 +206,16 @@ public static class YouTubeCatalog
             return new YouTubePlayable(id, hls, title, kind, storyboardSpec: board);
         }
 
-        if (TryUrl(streaming, "dashManifestUrl", out var dash))
+        if (TryUrl(streaming, "dashManifestUrl", out var dash) && !live)
         {
-            return new YouTubePlayable(id, dash, title, kind, storyboardSpec: board);
+            return new YouTubePlayable(id, dash, title, StreamKind.Vod, storyboardSpec: board);
+        }
+
+        // Live googlevideo DASH/progressive URLs expire immediately and 403
+        // without a player n-sig. Only HLS from an Innertube client plays.
+        if (live)
+        {
+            return null;
         }
 
         if (TryBestFormatUrl(streaming, "formats", out var progressive))

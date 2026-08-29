@@ -1,3 +1,4 @@
+using Grok.Player.Core.Launch;
 using Grok.Player.Core.Media;
 using Grok.Player.Core.Player;
 using Grok.Player.Core.Presentation;
@@ -529,6 +530,189 @@ public sealed class PlaybackViewModelTests
         Assert.NotNull(view.Subtitles.Applied);
         Assert.Contains("BEHIND ME", view.Subtitles.Applied!.Document.Cues[0].Text, StringComparison.Ordinal);
         File.Delete(vtt);
+    }
+
+    [Fact]
+    public void Protocol_vod_caption_file_applies_to_direct_media()
+    {
+        var caption = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".vtt");
+        File.WriteAllText(caption, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello vod\n");
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        view.AddStream(
+            ExternalOpen.ToProtocol(
+                "https://cdn.example/movie.m3u8",
+                "Movie",
+                StreamKind.Vod,
+                subLang: "en",
+                captionUrl: caption),
+            play: true);
+        var until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until && view.Subtitles.Applied is null)
+        {
+            Thread.Sleep(20);
+            host.ProcessPendingEvents();
+        }
+
+        try
+        {
+            Assert.Equal(StreamKind.Vod, view.Streams.Items[0].StreamKind);
+            Assert.False(view.IsLive);
+            Assert.Equal("Hello vod", view.Subtitles.Applied?.Document.Cues[0].Text);
+        }
+        finally
+        {
+            File.Delete(caption);
+        }
+    }
+
+    [Fact]
+    public void Protocol_duration_without_kind_is_vod_not_live()
+    {
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        view.AddStream(
+            ExternalOpen.ToProtocol(
+                "https://cdn.example/rapidrame/master.m3u8",
+                "Film",
+                StreamKind.Unknown,
+                durationSeconds: 6120),
+            play: true);
+        Assert.Equal(StreamKind.Vod, view.Streams.Items[0].StreamKind);
+        Assert.False(view.IsLive);
+        Assert.DoesNotContain(fake.Lifecycle, item => item.Contains("live_start_index=-1", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Protocol_vod_hls_does_not_use_live_demuxer()
+    {
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        view.AddStream(
+            ExternalOpen.ToProtocol(
+                "https://rumble.com/hls-vod/abc/playlist.m3u8",
+                "Rumble",
+                StreamKind.Vod),
+            play: true);
+        Assert.Equal(StreamKind.Vod, view.Streams.Items[0].StreamKind);
+        Assert.False(view.IsLive);
+        Assert.DoesNotContain(fake.Lifecycle, item => item.Contains("live_start_index=-1", StringComparison.Ordinal));
+        Assert.Contains(fake.Lifecycle, item => item.Contains("force-seekable=yes", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Protocol_sound_attaches_sidecar_audio()
+    {
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        const string video = "https://scontent.cdninstagram.com/o1/v/t16/v1?mime_type=video_mp4";
+        const string sound = "https://scontent.cdninstagram.com/o1/v/t16/a1?mime_type=audio_mp4";
+        view.AddStream(
+            ExternalOpen.ToProtocol(
+                video,
+                "Reel",
+                StreamKind.Vod,
+                referer: "https://www.instagram.com/",
+                soundtrack: sound),
+            play: true);
+        Assert.Equal(sound, view.Streams.Items[0].AudioUrl);
+        Assert.Contains(fake.Lifecycle, item => item.Contains("audio-files=", StringComparison.Ordinal) &&
+                                               item.Contains("audio_mp4", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Instagram_cdn_url_uses_the_long_lavf_probe()
+    {
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        view.AddStream(
+            ExternalOpen.ToProtocol(
+                "https://scontent.cdninstagram.com/o1/v/t16/f2/m86/foo",
+                "Reel",
+                StreamKind.Vod,
+                referer: "https://www.instagram.com/"),
+            play: true);
+        Assert.Contains(fake.Lifecycle, item => item.Contains("demuxer-lavf-analyzeduration=10", StringComparison.Ordinal));
+        Assert.Contains(fake.Lifecycle, item => item.Contains("instagram.com", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Tiktok_cdn_url_opens_as_direct_media()
+    {
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        const string cdn = "https://v16-webapp.tiktokcdn.com/video/tos/foo?mime_type=video_mp4";
+        view.AddStream(
+            ExternalOpen.ToProtocol(cdn, "TikTok", StreamKind.Vod, referer: "https://www.tiktok.com/"),
+            play: true);
+        Assert.Contains(fake.Commands, command =>
+            command.Length >= 2 &&
+            command[0] == "loadfile" &&
+            command[1].Contains("tiktokcdn", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(fake.Lifecycle, item => item.Contains("live_start_index=-1", StringComparison.Ordinal));
+        Assert.Contains(fake.Lifecycle, item => item.Contains("demuxer-lavf-analyzeduration=10", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Protocol_duration_is_not_applied_before_playback()
+    {
+        var fake = new FakeMpvNative { AutoLoad = false };
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        view.AddStream(
+            ExternalOpen.ToProtocol(
+                "https://scontent.cdninstagram.com/o1/v/t16/f2/m86/foo",
+                "Reel",
+                StreamKind.Vod,
+                referer: "https://www.instagram.com/",
+                durationSeconds: 60),
+            play: true);
+        host.ProcessPendingEvents();
+        Assert.Null(host.Duration);
+        Assert.Equal(TimeSpan.Zero, host.Position);
+    }
+
+    [Fact]
+    public void Protocol_duration_is_used_when_mpv_has_none()
+    {
+        var fake = new FakeMpvNative();
+        fake.AutoDurationSeconds = 0;
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        view.AddStream(
+            ExternalOpen.ToProtocol(
+                "https://v16-webapp.tiktokcdn.com/video/tos/foo?mime_type=video_mp4",
+                "TikTok",
+                StreamKind.Vod,
+                referer: "https://www.tiktok.com/",
+                durationSeconds: 5),
+            play: true);
+        host.ProcessPendingEvents();
+        Assert.Equal(TimeSpan.FromSeconds(5), host.Duration);
+    }
+
+    [Fact]
+    public void Protocol_live_keeps_live_kind_and_skips_search()
+    {
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(
+            host,
+            streamSubtitles: new StreamSubtitleSettings { Mode = StreamSubtitleMode.On, LastSub = "tr:asr" });
+        view.AddStream(
+            ExternalOpen.ToProtocol("https://cdn.example/live.m3u8", "Live", StreamKind.Live),
+            play: true);
+        Assert.Equal(StreamKind.Live, view.Streams.Items[0].StreamKind);
+        Assert.True(view.IsLive);
+        Assert.True(view.Streams.Items[0].SkipCaptions || view.PreferredSubLang is null);
+        Assert.Null(view.Subtitles.Applied);
+        Assert.Contains(fake.Lifecycle, item => item.Contains("slang=no", StringComparison.Ordinal));
     }
 
     [Fact]

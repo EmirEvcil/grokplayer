@@ -59,6 +59,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
     private int _captionAppliedSerial;
     private bool _skipStreamCaptions;
     private int _videoHeight;
+    private double? _hintDuration;
 
     public PlaybackViewModel(
         PlayerHost player,
@@ -658,13 +659,22 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         var trimmed = url.Trim();
         var protocol = trimmed.StartsWith("grokplayer:", StringComparison.OrdinalIgnoreCase);
         string? captionUrl = null;
+        string? referer = null;
+        string? soundtrack = null;
+        var protocolKind = StreamKind.Unknown;
         if (ExternalOpen.TryParse(trimmed, out var external))
         {
             trimmed = external.Url;
             title ??= external.Title;
             if (external.Kind != StreamKind.Unknown)
             {
+                protocolKind = external.Kind;
                 _isLive = external.Kind == StreamKind.Live;
+            }
+            else if (external.DurationSeconds is > 0)
+            {
+                protocolKind = StreamKind.Vod;
+                _isLive = false;
             }
 
             audioLang ??= external.AudioLang;
@@ -675,6 +685,12 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             }
 
             captionUrl ??= external.CaptionUrl;
+            referer ??= external.Referer;
+            soundtrack = external.Soundtrack;
+            if (external.DurationSeconds is > 0)
+            {
+                _hintDuration = external.DurationSeconds;
+            }
         }
 
         if (height > 0)
@@ -687,7 +703,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             _audioLang = MediaLanguage.IsPlausible(MediaLanguage.Normalize(audioLang))
                 ? MediaLanguage.Normalize(audioLang)
                 : null;
-            if (MediaLanguage.IsOff(subLang))
+            if (protocolKind == StreamKind.Live || MediaLanguage.IsOff(subLang))
             {
                 _skipStreamCaptions = true;
                 _subLang = null;
@@ -763,6 +779,21 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
 
         if (item is not null)
         {
+            if (protocolKind != StreamKind.Unknown)
+            {
+                item.StreamKind = protocolKind;
+            }
+
+            if (!string.IsNullOrWhiteSpace(referer))
+            {
+                item.Referer = referer;
+            }
+
+            if (!string.IsNullOrWhiteSpace(soundtrack))
+            {
+                item.AudioUrl = soundtrack;
+            }
+
             if (height > 0)
             {
                 item.VideoHeight = HlsPlaylist.NormalizeHeight(height);
@@ -1437,6 +1468,26 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         RefreshFromPlayer();
     }
 
+    private void ApplyHintDuration()
+    {
+        if (_hintDuration is not > 0)
+        {
+            return;
+        }
+
+        if (_player.State is not PlayerState.Playing and not PlayerState.Paused)
+        {
+            return;
+        }
+
+        if (_player.Duration is { } known && known > TimeSpan.Zero)
+        {
+            return;
+        }
+
+        _player.HintDuration(TimeSpan.FromSeconds(_hintDuration.Value));
+    }
+
     private void OnPlayerChanged(object? sender, EventArgs e)
     {
         if (_player.State is PlayerState.Playing or PlayerState.Paused)
@@ -1456,6 +1507,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         }
 
         ClassifyLive();
+        ApplyHintDuration();
         TryResume();
         BindSubtitles();
         if (_player.State is PlayerState.Playing or PlayerState.Paused)
@@ -1661,19 +1713,34 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
                 return;
             }
 
-            var ext = StreamProbe.Extension(path);
-            if (item is not null && item.StreamKind == StreamKind.Unknown && ext is ".m3u8" or ".m3u" or ".mpd")
+            if (StreamCatalog.LooksResolvable(path))
             {
-                item.StreamKind = StreamKind.Live;
+                SetYouTubePending(true);
+                OpenCatalog(path, item, serial);
+                return;
             }
 
+            var ext = StreamProbe.Extension(path);
             if (_inspector is not null)
             {
                 QueueInspect(path, item);
             }
 
             _isLive = item?.StreamKind == StreamKind.Live;
-            LoadPath(path, _isLive ? StreamKind.Live : StreamKind.Unknown, null, item?.Title);
+            var openKind = item?.StreamKind == StreamKind.Vod
+                ? StreamKind.Vod
+                : _isLive ? StreamKind.Live : StreamKind.Unknown;
+            LoadPath(path, openKind, item?.AudioUrl, item?.Title, referer: item?.Referer);
+            var mediaForCaptions = ext is ".m3u8" or ".m3u" or ".mpd" or ".mp4" or ".mkv" or ".webm" or ".mov" or ".m4v";
+            var knownLive = item?.StreamKind == StreamKind.Live;
+            if (StreamSubtitles.Enabled &&
+                !_skipStreamCaptions &&
+                mediaForCaptions &&
+                (!knownLive || !string.IsNullOrWhiteSpace(item?.CaptionUrl)))
+            {
+                QueueDirectCaptions(path, item);
+            }
+
             return;
         }
 
@@ -1736,7 +1803,10 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
                            ?? YouTubeCatalog.Resolve(path, null, audioLang, subLang);
                 if (playable is not null)
                 {
-                    playable = YouTubeCatalog.BindHlsRenditions(playable, height);
+                    if (playable.Kind != StreamKind.Live)
+                    {
+                        playable = YouTubeCatalog.BindHlsRenditions(playable, height);
+                    }
                     if (loadCaptions)
                     {
                         var attached = item?.CaptionUrl ?? playable.CaptionUrl;
@@ -1764,6 +1834,132 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         });
     }
 
+    private void OpenCatalog(string path, PlaylistItem? item, int serial)
+    {
+        var audioLang = _audioLang;
+        var subLang = _subLang;
+        var loadCaptions = StreamSubtitles.Enabled && !_skipStreamCaptions;
+        if (CanReplayCached(item, audioLang, subLang, PlaybackHeight(item)))
+        {
+            var cached = ReplayCached(item, path);
+            if (cached is not null)
+            {
+                ApplyYouTube(
+                    path,
+                    item,
+                    cached,
+                    serial,
+                    loadCaptions
+                        ? StreamCaptionLoader.Existing(
+                            cached.VideoId,
+                            subLang ?? cached.SubLang,
+                            item?.CaptionUrl ?? cached.CaptionUrl)
+                        : null);
+                return;
+            }
+        }
+
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            YouTubePlayable? playable = null;
+            string? caption = null;
+            try
+            {
+                playable = StreamCatalog.Resolve(path, audioLang, subLang);
+                if (playable is not null &&
+                    !string.IsNullOrWhiteSpace(item?.Referer) &&
+                    string.IsNullOrWhiteSpace(playable.Referer))
+                {
+                    playable = playable.WithReferer(item.Referer);
+                }
+
+                if (playable is not null && loadCaptions && playable.Kind != StreamKind.Live)
+                {
+                    var attached = item?.CaptionUrl ?? playable.CaptionUrl;
+                    var lang = StreamCaptionLoader.EffectiveLanguage(subLang ?? playable.SubLang, attached);
+                    caption = File.Exists(attached)
+                        ? attached
+                        : StreamCaptionLoader.Existing(playable.VideoId, lang, attached);
+                    if (string.IsNullOrWhiteSpace(caption) && !string.IsNullOrWhiteSpace(attached))
+                    {
+                        caption = StreamCaptionLoader.Load(playable.VideoId, lang, attached);
+                    }
+
+                    if (string.IsNullOrWhiteSpace(caption) && playable.Kind != StreamKind.Live)
+                    {
+                        playable = StreamCatalog.AttachVodCaptions(playable, lang);
+                        caption = playable.CaptionUrl;
+                    }
+                }
+            }
+            catch (Exception)
+            {
+            }
+
+            OnUi(() => ApplyYouTube(path, item, playable, serial, caption));
+        });
+    }
+
+    private void QueueDirectCaptions(string path, PlaylistItem? item)
+    {
+        var serial = Volatile.Read(ref _openSerial);
+        var lang = _subLang ?? item?.SubLang;
+        var hinted = item?.CaptionUrl;
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            string? file = null;
+            var fromManifest = false;
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(hinted) && File.Exists(hinted))
+                {
+                    file = hinted;
+                }
+                else if (!string.IsNullOrWhiteSpace(hinted))
+                {
+                    file = StreamCaptionLoader.Load(
+                        "direct|" + Math.Abs(path.GetHashCode(StringComparison.Ordinal)).ToString("x", System.Globalization.CultureInfo.InvariantCulture),
+                        lang,
+                        hinted);
+                }
+
+                if (string.IsNullOrWhiteSpace(file))
+                {
+                    file = HlsCaptions.TryLoad(path, lang, null, path);
+                    fromManifest = !string.IsNullOrWhiteSpace(file);
+                }
+            }
+            catch (Exception)
+            {
+            }
+
+            if (file is null)
+            {
+                return;
+            }
+
+            OnUi(() =>
+            {
+                if (serial != Volatile.Read(ref _openSerial) || _skipStreamCaptions || !StreamSubtitles.Enabled)
+                {
+                    return;
+                }
+
+                if (fromManifest && item is not null && item.StreamKind == StreamKind.Live)
+                {
+                    item.StreamKind = StreamKind.Vod;
+                    _isLive = false;
+                    OnPropertyChanged(nameof(IsLive));
+                }
+
+                _captionFile = file;
+                Subtitles.AddFile(file, apply: true, attachTo: path);
+                Subtitles.BindForMedia(path);
+                ShowPendingCaption();
+            });
+        });
+    }
+
     private void ApplyYouTube(string path, PlaylistItem? item, YouTubePlayable? playable, int serial, string? captionFile)
     {
         if (serial != Volatile.Read(ref _openSerial))
@@ -1781,7 +1977,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         if (playable is null)
         {
             SetYouTubePending(false);
-            Note("YouTube stream unavailable");
+            Note("Stream unavailable");
             return;
         }
 
@@ -1802,7 +1998,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         }
 
         item?.RememberPlayable(playable, PlaybackHeight(item), _audioLang, _subLang);
-        _contentKey = "youtube|" + playable.VideoId;
+        _contentKey = StreamCatalog.ContentKey(playable.VideoId);
         item?.SetTitle(playable.Title);
         if (item is not null)
         {
@@ -1810,6 +2006,12 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         }
 
         _isLive = playable.Kind == StreamKind.Live;
+        if (_isLive)
+        {
+            _skipStreamCaptions = true;
+            captionFile = null;
+        }
+
         if (!string.IsNullOrWhiteSpace(playable.AudioLang))
         {
             _audioLang = MediaLanguage.Normalize(playable.AudioLang);
@@ -1853,14 +2055,15 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             playable.UserAgent,
             _audioLang,
             "no",
-            StreamCaptionLoader.PlayPath(_captionFile));
+            StreamCaptionLoader.PlayPath(_captionFile),
+            playable.Referer ?? item?.Referer);
         if (!string.IsNullOrWhiteSpace(_audioLang) || !string.IsNullOrWhiteSpace(_subLang))
         {
             Note("Audio " + (_audioLang ?? "auto") + " · Subtitles " + (_subLang ?? "off"));
         }
         if (StreamSubtitles.Enabled && !_skipStreamCaptions && !string.IsNullOrWhiteSpace(_captionFile))
         {
-            Subtitles.AddFile(_captionFile, apply: true, attachTo: "youtube|" + playable.VideoId);
+            Subtitles.AddFile(_captionFile, apply: true, attachTo: StreamCatalog.ContentKey(playable.VideoId));
             Subtitles.BindForMedia(_contentKey);
             ShowPendingCaption();
         }
@@ -1907,15 +2110,36 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             return null;
         }
 
-        if (!YouTubeCatalog.TryReadVideoId(path, out var id) &&
-            !YouTubeCatalog.TryReadVideoId(item.Path, out id))
+        string? id = null;
+        if (YouTubeCatalog.TryReadVideoId(path, out var youtubeId) ||
+            YouTubeCatalog.TryReadVideoId(item.Path, out youtubeId))
+        {
+            id = youtubeId;
+        }
+        else if (StreamCatalog.TryReadKick(path, out _, out var kickId) ||
+                 StreamCatalog.TryReadKick(item.Path, out _, out kickId))
+        {
+            id = "kick|" + kickId;
+        }
+        else if (StreamCatalog.TryReadTwitch(path, out var twitchKind, out var twitchId) ||
+                 StreamCatalog.TryReadTwitch(item.Path, out twitchKind, out twitchId))
+        {
+            id = twitchKind == "vod" ? "twitch|v" + twitchId : "twitch|" + twitchId;
+        }
+        else if (StreamCatalog.IsDirectMedia(path) || StreamCatalog.IsDirectMedia(item.Path))
+        {
+            id = "direct|" + Math.Abs((item.MediaUrl ?? path).GetHashCode(StringComparison.Ordinal))
+                .ToString("x", System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        if (string.IsNullOrWhiteSpace(id))
         {
             return null;
         }
 
         return new YouTubePlayable(
             id,
-            item.MediaUrl,
+            item.MediaUrl!,
             item.Title,
             item.StreamKind == StreamKind.Unknown ? StreamKind.Vod : item.StreamKind,
             item.AudioUrl,
@@ -1923,7 +2147,8 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             item.AudioLang,
             item.SubLang,
             item.CaptionUrl,
-            storyboardSpec: item.StoryboardSpec);
+            storyboardSpec: item.StoryboardSpec,
+            referer: item.Referer);
     }
 
     private void SetYouTubePending(bool value)
@@ -1941,9 +2166,9 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         OnPropertyChanged(nameof(SeekValue));
     }
 
-    private void LoadPath(string path, StreamKind kind, string? audio, string? title, string? userAgent = null, string? audioLang = null, string? subLang = null, string? subFile = null)
+    private void LoadPath(string path, StreamKind kind, string? audio, string? title, string? userAgent = null, string? audioLang = null, string? subLang = null, string? subFile = null, string? referer = null)
     {
-        _player.Open(path, kind, audio, title, userAgent, audioLang, subLang, subFile);
+        _player.Open(path, kind, audio, title, userAgent, audioLang, subLang, subFile, referer);
         OnPropertyChanged(nameof(IsLoading));
     }
 
@@ -1980,8 +2205,8 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
 
                 _captionFile = file;
                 _captionAppliedSerial = 0;
-                Subtitles.AddFile(file, apply: true, attachTo: "youtube|" + id);
-                Subtitles.BindForMedia("youtube|" + id);
+                Subtitles.AddFile(file, apply: true, attachTo: StreamCatalog.ContentKey(id));
+                Subtitles.BindForMedia(StreamCatalog.ContentKey(id));
                 Note("Subtitles loaded");
                 ShowPendingCaption();
             });
@@ -2216,7 +2441,19 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         if (YouTubeCatalog.TryReadVideoId(keyPath, out var videoId) ||
             YouTubeCatalog.TryReadVideoId(path, out videoId))
         {
-            return "youtube|" + videoId;
+            return StreamCatalog.ContentKey(videoId);
+        }
+
+        if (StreamCatalog.TryReadKick(keyPath, out _, out var kickId) ||
+            StreamCatalog.TryReadKick(path, out _, out kickId))
+        {
+            return "kick|" + kickId;
+        }
+
+        if (StreamCatalog.TryReadTwitch(keyPath, out _, out var twitchId) ||
+            StreamCatalog.TryReadTwitch(path, out _, out twitchId))
+        {
+            return "twitch|" + twitchId;
         }
 
         if (UrlSanitizer.IsUrl(path))
