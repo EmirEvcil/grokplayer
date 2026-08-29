@@ -83,6 +83,10 @@ internal static class FfmpegMux
                 return false;
             }
 
+            try { process.PriorityClass = ProcessPriorityClass.BelowNormal; }
+            catch (InvalidOperationException) { }
+            catch (System.ComponentModel.Win32Exception) { }
+
             var stderr = process.StandardError.ReadToEnd();
             if (!process.WaitForExit(120_000))
             {

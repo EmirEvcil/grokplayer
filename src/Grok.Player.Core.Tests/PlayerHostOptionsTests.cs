@@ -30,6 +30,7 @@ public sealed class PlayerHostOptionsTests
         Assert.True(fake.HasOption("keep-open", "yes"));
         Assert.True(fake.HasOption("blend-subtitles", "yes"));
         Assert.True(fake.HasOption("sub-visibility", "yes"));
+        Assert.True(fake.HasOption("sub-pos", "100"));
 
         var initializeAt = fake.Lifecycle.IndexOf("initialize");
         Assert.InRange(initializeAt, 1, fake.Lifecycle.Count - 1);

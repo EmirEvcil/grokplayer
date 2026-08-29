@@ -6,6 +6,7 @@ public sealed class SeekPreviewScheduler : IDisposable
     private static readonly double[] LocalHoverOffsets = [-1, 1, -3, 3, -6, 6];
     private readonly ISeekPreviewRenderer _renderer;
     private readonly double _bucketSeconds;
+    private readonly int _atlasUpgradeDelayMs;
     private readonly Dictionary<int, string> _cache = [];
     private readonly LinkedList<int> _lru = [];
     private readonly Queue<TimeSpan> _prefetch = [];
@@ -15,19 +16,28 @@ public sealed class SeekPreviewScheduler : IDisposable
     private string? _path;
     private bool _network;
     private TimeSpan _pending = TimeSpan.FromSeconds(-1);
+    private TimeSpan _hover = TimeSpan.FromSeconds(-1);
+    private double? _pendingBehindLiveSeconds;
+    private DateTime _pendingRequestedUtc;
     private bool _storyboardQueued;
+    private bool _warmRequested;
+    private bool _warmPending;
     private IPreviewAtlas? _atlas;
     private volatile bool _running = true;
 
-    public SeekPreviewScheduler(ISeekPreviewRenderer renderer, double bucketSeconds = 0.2)
+    public SeekPreviewScheduler(
+        ISeekPreviewRenderer renderer,
+        double bucketSeconds = 0.2,
+        int atlasUpgradeDelayMs = 260)
     {
         _renderer = renderer ?? throw new ArgumentNullException(nameof(renderer));
         _bucketSeconds = Math.Max(0.05, bucketSeconds);
+        _atlasUpgradeDelayMs = Math.Max(0, atlasUpgradeDelayMs);
         _thread = new Thread(Loop)
         {
             IsBackground = true,
             Name = "seek-preview",
-            Priority = ThreadPriority.AboveNormal
+            Priority = ThreadPriority.BelowNormal
         };
         _thread.Start();
     }
@@ -72,8 +82,13 @@ public sealed class SeekPreviewScheduler : IDisposable
                 _network = path is not null && path.Contains("://", StringComparison.Ordinal);
                 ClearCache_NoLock();
                 _pending = TimeSpan.FromSeconds(-1);
+                _hover = TimeSpan.FromSeconds(-1);
+                _pendingBehindLiveSeconds = null;
+                _pendingRequestedUtc = default;
                 _prefetch.Clear();
                 _storyboardQueued = false;
+                _warmRequested = false;
+                _warmPending = false;
                 wake = true;
             }
 
@@ -102,16 +117,27 @@ public sealed class SeekPreviewScheduler : IDisposable
     {
         lock (_gate)
         {
+            var bucket = Bucket(time);
+            // A decoder capture is the final quality tier. Do not downgrade it
+            // back to a 160x90 storyboard when the pointer moves over the same bucket.
+            if (_cache.TryGetValue(bucket, out var decoded) && File.Exists(decoded))
+            {
+                Touch_NoLock(bucket);
+                return decoded;
+            }
+
             if (_atlas is not null && _atlas.TryGetFrame(time, out var atlas) && File.Exists(atlas))
             {
                 return atlas;
             }
 
-            var bucket = Bucket(time);
-            if (_cache.TryGetValue(bucket, out var path))
+            // With a storyboard source, a nearby decoded frame belongs to a
+            // different hover target. Showing it while the requested cell is
+            // loading creates a visible stale-image flash. Wait for the correct
+            // storyboard/decoder result instead of borrowing a neighbor.
+            if (_atlas is not null)
             {
-                Touch_NoLock(bucket);
-                return path;
+                return null;
             }
 
             var behind = maxDeltaSeconds < 0 ? (_network ? 10 : double.MaxValue) : maxDeltaSeconds;
@@ -138,7 +164,31 @@ public sealed class SeekPreviewScheduler : IDisposable
         }
     }
 
-    public void Request(string path, TimeSpan time)
+    public void Request(string path, TimeSpan time) => Request(path, time, includeNeighbors: true);
+
+    public void RequestExact(string path, TimeSpan time) =>
+        Request(path, time, includeNeighbors: false);
+
+    public void RequestLiveExact(string path, TimeSpan time, double behindLiveSeconds) =>
+        Request(path, time, includeNeighbors: false, behindLiveSeconds, DateTime.UtcNow);
+
+    public void Warm(string path)
+    {
+        lock (_gate)
+        {
+            if (string.IsNullOrWhiteSpace(path) || _warmRequested) return;
+            _warmRequested = true;
+            _warmPending = true;
+        }
+        _signal.Set();
+    }
+
+    private void Request(
+        string path,
+        TimeSpan time,
+        bool includeNeighbors,
+        double? behindLiveSeconds = null,
+        DateTime requestedUtc = default)
     {
         lock (_gate)
         {
@@ -151,11 +201,18 @@ public sealed class SeekPreviewScheduler : IDisposable
             }
 
             _pending = time;
+            _pendingBehindLiveSeconds = behindLiveSeconds;
+            _pendingRequestedUtc = requestedUtc;
+            _hover = time;
             if (_atlas is not null)
             {
-                // Worker will pull the atlas cell first.
+                _prefetch.Clear();
+                _atlas.Prioritize(time);
+                var step = _atlas.IntervalSeconds;
+                foreach (var offset in new[] { -1, 1, -2, 2 })
+                    _prefetch.Enqueue(TimeSpan.FromSeconds(Math.Max(0, time.TotalSeconds + step * offset)));
             }
-            else if (_network)
+            else if (_network && includeNeighbors)
             {
                 // A new hover supersedes speculative work for the old location.
                 // The exact point is handled by _pending, then its closest neighbors.
@@ -197,11 +254,22 @@ public sealed class SeekPreviewScheduler : IDisposable
                 string? path;
                 TimeSpan requested;
                 IPreviewAtlas? atlas;
+                bool warm;
+                double? behindLiveSeconds;
+                DateTime requestedUtc;
                 lock (_gate)
                 {
                     path = _path;
-                    requested = TakeNext_NoLock();
+                    requested = TakeNext_NoLock(out behindLiveSeconds, out requestedUtc);
                     atlas = _atlas;
+                    warm = requested < TimeSpan.Zero && _warmPending;
+                    if (warm) _warmPending = false;
+                }
+
+                if (warm && !string.IsNullOrWhiteSpace(path))
+                {
+                    try { _renderer.Prepare(path); } catch { }
+                    continue;
                 }
 
                 if (string.IsNullOrWhiteSpace(path) || requested < TimeSpan.Zero)
@@ -220,18 +288,57 @@ public sealed class SeekPreviewScheduler : IDisposable
                     break;
                 }
 
+                // Once the final decoder tier exists, it always wins. Checking
+                // this only after publishing atlas frames made repeated pointer
+                // events alternate 512x288 -> 320x180 -> 512x288.
+                var decodedBucket = Bucket(requested);
+                string? decoded;
+                lock (_gate)
+                {
+                    _cache.TryGetValue(decodedBucket, out decoded);
+                    if (decoded is not null && File.Exists(decoded))
+                        Touch_NoLock(decodedBucket);
+                    else
+                        decoded = null;
+                }
+                if (decoded is not null)
+                {
+                    PublishCurrent(path, atlas, requested, decoded, allowSameAtlasFrame: false);
+                    continue;
+                }
+
                 if (atlas is not null)
                 {
+                    var atlasServed = false;
                     try
                     {
                         if (atlas.TryGetOrFetch(requested, out var tile) && File.Exists(tile))
                         {
-                            FrameReady?.Invoke(requested, tile);
-                            continue;
+                            atlasServed = true;
+                            PublishCurrent(path, atlas, requested, tile, allowSameAtlasFrame: true);
+                            if (atlas.TryGetOrFetchBest(requested, out var best) &&
+                                File.Exists(best) && !string.Equals(best, tile, StringComparison.OrdinalIgnoreCase))
+                                PublishCurrent(path, atlas, requested, best, allowSameAtlasFrame: true);
                         }
                     }
                     catch
                     {
+                    }
+
+                    if (atlasServed)
+                    {
+                        if (!atlas.NeedsDecodedUpgrade)
+                        {
+                            continue;
+                        }
+
+                        // Storyboards often top out at 160x90. Upgrade only after
+                        // a short dwell; a new pointer request wakes this wait and
+                        // replaces the pending target before decoder work starts.
+                        if (!WaitForStableHover(path, atlas, requested))
+                        {
+                            continue;
+                        }
                     }
                 }
 
@@ -239,6 +346,7 @@ public sealed class SeekPreviewScheduler : IDisposable
                 string? cached;
                 lock (_gate)
                 {
+                    if (_path != path || _pending >= TimeSpan.Zero) continue;
                     if (_cache.TryGetValue(bucket, out cached))
                     {
                         Touch_NoLock(bucket);
@@ -247,14 +355,30 @@ public sealed class SeekPreviewScheduler : IDisposable
 
                 if (cached is not null)
                 {
-                    FrameReady?.Invoke(requested, cached);
+                    PublishCurrent(path, atlas, requested, cached, allowSameAtlasFrame: false);
                     continue;
                 }
 
                 try
                 {
-                    _renderer.Prepare(path);
-                    var image = _renderer.Capture(requested);
+                    string? image;
+                    if (behindLiveSeconds is { } behind)
+                    {
+                        image = _renderer is ILiveSeekPreviewRenderer liveRenderer
+                            ? liveRenderer.CaptureBehindLive(path, behind, requestedUtc)
+                            : null;
+                    }
+                    else
+                    {
+                        _renderer.Prepare(path);
+                        // Match the discrete storyboard cell in the final decoder
+                        // tier. PlaybackRestart still guarantees this is a fresh
+                        // frame rather than stale decoder output.
+                        var captureTime = atlas?.FrameTime(requested) ?? requested;
+                        image = atlas is not null && _renderer is IExactSeekPreviewRenderer exactRenderer
+                            ? exactRenderer.CaptureExact(captureTime)
+                            : _renderer.Capture(captureTime);
+                    }
                     if (image is null)
                     {
                         continue;
@@ -271,7 +395,7 @@ public sealed class SeekPreviewScheduler : IDisposable
                         Store_NoLock(bucket, image);
                     }
 
-                    FrameReady?.Invoke(requested, image);
+                    PublishCurrent(path, atlas, requested, image, allowSameAtlasFrame: false);
                 }
                 catch
                 {
@@ -307,18 +431,70 @@ public sealed class SeekPreviewScheduler : IDisposable
         }
     }
 
+    private void PublishCurrent(
+        string path,
+        IPreviewAtlas? atlas,
+        TimeSpan time,
+        string image,
+        bool allowSameAtlasFrame)
+    {
+        var publish = false;
+        lock (_gate)
+        {
+            // Speculative neighbors are cached, but must never replace the exact
+            // hovered frame or leak from an earlier media/atlas generation.
+            var currentFrame = Math.Abs((_hover - time).TotalSeconds) <= _bucketSeconds / 2 ||
+                               allowSameAtlasFrame && atlas?.RepresentsSameFrame(_hover, time) == true;
+            if (!_running || _path != path || !ReferenceEquals(_atlas, atlas) || !currentFrame)
+                return;
+            publish = true;
+        }
+        if (publish) FrameReady?.Invoke(time, image);
+    }
+
+    private bool IsCurrentHover(string path, IPreviewAtlas? atlas, TimeSpan time)
+    {
+        lock (_gate)
+        {
+            return _running && _path == path && ReferenceEquals(_atlas, atlas) &&
+                   _pending < TimeSpan.Zero &&
+                   Math.Abs((_hover - time).TotalSeconds) <= _bucketSeconds / 2;
+        }
+    }
+
+    private bool WaitForStableHover(string path, IPreviewAtlas? atlas, TimeSpan time)
+    {
+        var deadline = Environment.TickCount64 + _atlasUpgradeDelayMs;
+        while (true)
+        {
+            if (!IsCurrentHover(path, atlas, time)) return false;
+            var remaining = deadline - Environment.TickCount64;
+            if (remaining <= 0) return true;
+
+            // A signal may be left over from the request that produced `time`.
+            // Consume it, but only cancel when the actual hover target changed.
+            _signal.WaitOne((int)Math.Min(int.MaxValue, remaining));
+        }
+    }
+
     private void Touch_NoLock(int bucket)
     {
         _lru.Remove(bucket);
         _lru.AddFirst(bucket);
     }
 
-    private TimeSpan TakeNext_NoLock()
+    private TimeSpan TakeNext_NoLock(out double? behindLiveSeconds, out DateTime requestedUtc)
     {
+        behindLiveSeconds = null;
+        requestedUtc = default;
         if (_pending >= TimeSpan.Zero)
         {
             var hover = _pending;
+            behindLiveSeconds = _pendingBehindLiveSeconds;
+            requestedUtc = _pendingRequestedUtc;
             _pending = TimeSpan.FromSeconds(-1);
+            _pendingBehindLiveSeconds = null;
+            _pendingRequestedUtc = default;
             return hover;
         }
 

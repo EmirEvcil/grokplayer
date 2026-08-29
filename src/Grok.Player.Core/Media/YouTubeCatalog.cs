@@ -263,16 +263,27 @@ public static class YouTubeCatalog
     internal static YouTubePlayable BindMaster(YouTubePlayable playable, string master, int maxHeight = 0)
     {
         var wantAudio = !string.IsNullOrWhiteSpace(playable.AudioLang);
+        var needDub = wantAudio && !MediaLanguage.IsOriginal(playable.AudioLang);
         var variants = Download.HlsPlaylist.Variants(master, playable.MediaUrl);
         var height = Download.HlsPlaylist.NormalizeHeight(maxHeight);
-        var pick = Download.HlsPlaylist.Pick(variants, height, preferVideoOnly: true)
+        var pick = Download.HlsPlaylist.Pick(variants, height, preferVideoOnly: needDub)
                    ?? Download.HlsPlaylist.Pick(variants, height);
-        var audio = (wantAudio
-                ? Download.HlsPlaylist.AudioUri(master, playable.MediaUrl, playable.AudioLang, pick?.Audio, fallback: false)
-                  ?? Download.HlsPlaylist.AudioUri(master, playable.MediaUrl, playable.AudioLang, fallback: false)
-                : null)
-            ?? Download.HlsPlaylist.AudioUri(master, playable.MediaUrl, MediaLanguage.Original, pick?.Audio, fallback: false)
-            ?? Download.HlsPlaylist.AudioUri(master, playable.MediaUrl, MediaLanguage.Original, fallback: false);
+        string? audio = null;
+        if (pick is null || pick.LooksVideoOnly || needDub)
+        {
+            audio = (needDub
+                    ? Download.HlsPlaylist.AudioUri(master, playable.MediaUrl, playable.AudioLang, pick?.Audio, fallback: false)
+                      ?? Download.HlsPlaylist.AudioUri(master, playable.MediaUrl, playable.AudioLang, fallback: false)
+                    : null)
+                ?? Download.HlsPlaylist.AudioUri(master, playable.MediaUrl, MediaLanguage.Original, pick?.Audio, fallback: false)
+                ?? Download.HlsPlaylist.AudioUri(master, playable.MediaUrl, MediaLanguage.Original, fallback: false);
+        }
+
+        if (pick is { LooksVideoOnly: false } && !needDub)
+        {
+            audio = null;
+        }
+
         var bound = playable.WithHls(audio, Download.HlsPlaylist.SubtitleUri(master, playable.MediaUrl, playable.SubLang) is not null);
         if (pick is null || (pick.LooksVideoOnly && string.IsNullOrWhiteSpace(audio)))
         {
@@ -299,6 +310,49 @@ public static class YouTubeCatalog
 
         return url;
     }
+
+    public static string? CaptionLanguageFromUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url) ||
+            !Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return null;
+        }
+
+        var query = uri.Query.TrimStart('?');
+        var translated = QueryValue(query, "tlang");
+        if (!string.IsNullOrWhiteSpace(translated))
+        {
+            return MediaLanguage.Normalize(translated);
+        }
+
+        return CaptionSourceLanguageFromUrl(url);
+    }
+
+    public static string? CaptionSourceLanguageFromUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url) ||
+            !Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return null;
+        }
+
+        var query = uri.Query.TrimStart('?');
+        var lang = MediaLanguage.Normalize(QueryValue(query, "lang"));
+        if (lang.Length == 0)
+        {
+            return null;
+        }
+
+        var kind = QueryValue(query, "kind");
+        return string.Equals(kind, "asr", StringComparison.OrdinalIgnoreCase)
+            ? lang + ":asr"
+            : lang;
+    }
+
+    public static bool CaptionUrlIsTranslate(string? url) =>
+        !string.IsNullOrWhiteSpace(url) &&
+        url.Contains("tlang=", StringComparison.OrdinalIgnoreCase);
 
     public static bool CaptionUrlMatches(string url, string? language)
     {
@@ -347,6 +401,21 @@ public static class YouTubeCatalog
         return prefix + string.Join('&', parts);
     }
 
+    public static string WithoutTranslate(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url) || !CaptionUrlIsTranslate(url))
+        {
+            return url;
+        }
+
+        var prefix = url.Contains('?') ? url[..(url.IndexOf('?') + 1)] : url;
+        var query = url.Contains('?') ? url[(url.IndexOf('?') + 1)..] : "";
+        var parts = query.Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Where(pair => !pair.StartsWith("tlang=", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        return parts.Count == 0 ? prefix.TrimEnd('?') : prefix + string.Join('&', parts);
+    }
+
     public static string? CaptionLanguageHeader(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -366,20 +435,32 @@ public static class YouTubeCatalog
         return null;
     }
 
-    public static string EnsureVtt(string url)
+    public static string EnsureVtt(string url) => WithCaptionFormat(url, "vtt");
+
+    public static string WithCaptionFormat(string url, string format)
     {
         if (string.IsNullOrWhiteSpace(url) ||
-            url.Contains("fmt=", StringComparison.OrdinalIgnoreCase))
+            !url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
         {
             return url;
         }
 
-        return url + (url.Contains('?') ? "&" : "?") + "fmt=vtt";
+        var fmt = string.IsNullOrWhiteSpace(format) ? "vtt" : format.Trim();
+        if (url.Contains("fmt=", StringComparison.OrdinalIgnoreCase))
+        {
+            return System.Text.RegularExpressions.Regex.Replace(
+                url,
+                @"([?&]fmt=)[^&]*",
+                "$1" + Uri.EscapeDataString(fmt),
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        }
+
+        return url + (url.Contains('?') ? "&" : "?") + "fmt=" + Uri.EscapeDataString(fmt);
     }
 
     public static string? PickCaptionUrl(string? json, string? language)
     {
-        if (MediaLanguage.IsOff(language) || string.IsNullOrWhiteSpace(language))
+        if (MediaLanguage.IsOff(language))
         {
             return null;
         }
@@ -461,15 +542,18 @@ public static class YouTubeCatalog
                 }
             }
 
+            var wantAsr = string.Equals(MediaLanguage.Kind(language), "asr", StringComparison.OrdinalIgnoreCase);
             var picked = want.Length == 0
                 ? english ?? englishAsr ?? firstManual ?? firstAsr
-                : exact ?? exactAsr;
+                : wantAsr
+                    ? exactAsr ?? exact
+                    : exact ?? exactAsr;
             if (!string.IsNullOrWhiteSpace(picked))
             {
                 return EnsureVtt(picked);
             }
 
-            var source = english ?? englishAsr ?? firstManual ?? firstAsr;
+            var source = english ?? firstManual ?? englishAsr ?? firstAsr;
             return string.IsNullOrWhiteSpace(source) || want.Length == 0
                 ? null
                 : EnsureVtt(WithTranslate(source, want));
@@ -497,20 +581,64 @@ public static class YouTubeCatalog
             return File.ReadAllBytes(uri.LocalPath);
         }
 
+        foreach (var candidate in CaptionDownloadUrls(url))
+        {
+            var bytes = GetCaptionBytes(candidate);
+            if (bytes is { Length: > 15 })
+            {
+                return bytes;
+            }
+        }
+
+        return null;
+    }
+
+    internal static IEnumerable<string> CaptionDownloadUrls(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url) ||
+            !url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+        {
+            yield return url;
+            yield break;
+        }
+
+        yield return WithCaptionFormat(url, "srv3");
+        yield return WithCaptionFormat(url, "json3");
+        yield return EnsureVtt(url);
+    }
+
+    private static byte[]? GetCaptionBytes(string url)
+    {
         try
         {
-            using var request = new HttpRequestMessage(HttpMethod.Get, EnsureVtt(url));
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
             request.Headers.TryAddWithoutValidation("User-Agent", ChromeUa);
             request.Headers.TryAddWithoutValidation("Referer", "https://www.youtube.com/");
             request.Headers.TryAddWithoutValidation("Origin", "https://www.youtube.com");
             request.Headers.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
-            using var response = Http.Send(request);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+            using var response = Http.Send(request, cts.Token);
+            if ((int)response.StatusCode == 429)
+            {
+                Thread.Sleep(500);
+                using var retry = new HttpRequestMessage(HttpMethod.Get, url);
+                retry.Headers.TryAddWithoutValidation("User-Agent", ChromeUa);
+                retry.Headers.TryAddWithoutValidation("Referer", "https://www.youtube.com/");
+                retry.Headers.TryAddWithoutValidation("Origin", "https://www.youtube.com");
+                retry.Headers.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
+                using var retryCts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+                using var again = Http.Send(retry, retryCts.Token);
+                return again.IsSuccessStatusCode
+                    ? again.Content.ReadAsByteArrayAsync(retryCts.Token).GetAwaiter().GetResult()
+                    : null;
+            }
+
             if (!response.IsSuccessStatusCode)
             {
                 return null;
             }
 
-            return response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
+            return response.Content.ReadAsByteArrayAsync(cts.Token).GetAwaiter().GetResult();
         }
         catch (Exception)
         {
@@ -557,11 +685,13 @@ public static class YouTubeCatalog
 
         var hl = string.IsNullOrWhiteSpace(audioLang) ? "en" : audioLang;
         string? visitor = null;
+        string? pageStoryboard = null;
         var page = FetchText("https://www.youtube.com/watch?v=" + id + "&hl=" + hl + "&bpctr=9999999999&has_verified=1", ChromeUa);
         if (!string.IsNullOrWhiteSpace(page))
         {
             visitor = ExtractVisitorData(page);
             var pageJson = ExtractAssignedJson(page, "ytInitialPlayerResponse");
+            pageStoryboard = Preview.StoryboardSpec.FromPlayerJson(pageJson);
             var fromPage = pageJson is null ? null : ParsePlayerResponse(pageJson, id);
             if (fromPage is not null)
             {
@@ -584,12 +714,44 @@ public static class YouTubeCatalog
             if (playable is not null)
             {
                 return playable.WithUserAgent(client.UserAgent)
+                    .WithStoryboard(BetterStoryboard(pageStoryboard, playable.StoryboardSpec))
                     .WithLanguages(audioLang, subLang)
                     .WithCaption(PickCaptionUrl(json, subLang));
             }
         }
 
         return null;
+    }
+
+    internal static string? BetterStoryboard(string? pageSpec, string? clientSpec) =>
+        (Preview.StoryboardSpec.Parse(pageSpec)?.BestLevel?.Width ?? 0) >
+        (Preview.StoryboardSpec.Parse(clientSpec)?.BestLevel?.Width ?? 0) ? pageSpec : clientSpec;
+
+    // Refresh expired/page-bound timedtext URLs from actual track metadata.
+    // Never guess that a video has English/Turkish captions or discard the target language.
+    public static IEnumerable<string> FreshCaptionUrls(string videoId, string language, string? sourceHint)
+    {
+        string? visitor = null;
+        var source = CaptionSourceLanguageFromUrl(sourceHint);
+        var translated = CaptionUrlIsTranslate(sourceHint);
+        string? Pick(string? json)
+        {
+            var picked = ParseCaptionUrl(json, translated && !string.IsNullOrWhiteSpace(source) ? source : language);
+            return picked is null ? null : translated ? WithTranslate(picked, language) : picked;
+        }
+        var page = FetchText("https://www.youtube.com/watch?v=" + Uri.EscapeDataString(videoId), ChromeUa);
+        if (!string.IsNullOrWhiteSpace(page))
+        {
+            visitor = ExtractVisitorData(page);
+            var picked = Pick(ExtractAssignedJson(page, "ytInitialPlayerResponse"));
+            if (picked is not null) yield return picked;
+        }
+        foreach (var client in PlayerClients(videoId, visitor, "en"))
+        {
+            var json = FetchPlayer(client, visitor);
+            var picked = Pick(json);
+            if (picked is not null) yield return picked;
+        }
     }
 
     internal static string? ExtractAssignedJson(string? html, string name)

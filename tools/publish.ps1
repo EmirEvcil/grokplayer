@@ -20,6 +20,16 @@ foreach ($name in $required) {
     }
 }
 
+# Keep the browser extension's custom protocol on the canonical portable build.
+# Debug/AppX launches used during development must not leave Chrome opening an
+# older binary after a successful publish.
+$protocol = "HKCU:\Software\Classes\grokplayer"
+$command = Join-Path $protocol "shell\open\command"
+New-Item -Path $command -Force | Out-Null
+Set-Item -Path $protocol -Value "URL:GrokPlayer"
+New-ItemProperty -Path $protocol -Name "URL Protocol" -Value "" -PropertyType String -Force | Out-Null
+Set-Item -Path $command -Value ('"' + (Join-Path $outDir "GrokPlayer.exe") + '" --stream "%1"')
+
 $pri = Get-ChildItem $outDir -Filter "*.pri" -File -ErrorAction SilentlyContinue
 if (-not $pri) {
     throw "Publish is incomplete: no .pri resource file. The exe will crash on startup."

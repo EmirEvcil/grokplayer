@@ -226,10 +226,9 @@ public sealed class PlaybackViewModelTests
         host.ProcessPendingEvents();
         Assert.NotNull(view.Subtitles.Applied);
         Assert.Equal("Hello world", view.Subtitles.Applied!.Document.Cues[0].Text);
-        Assert.EndsWith(".ass", view.Subtitles.Applied.PlayPath, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("Hello world", File.ReadAllText(view.Subtitles.Applied.PlayPath), StringComparison.Ordinal);
         var added = fake.Commands.Last(command => command.Length >= 2 && command[0] == "sub-add");
-        Assert.EndsWith(".ass", added[1], StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Hello world", File.ReadAllText(added[1]), StringComparison.Ordinal);
         Assert.DoesNotContain(
             fake.Commands.Skip(fake.Commands.FindLastIndex(command => command.Length >= 1 && command[0] == "sub-add") + 1),
             command => command.Length >= 1 && command[0] == "sub-add");
@@ -335,7 +334,8 @@ public sealed class PlaybackViewModelTests
                      track.AttachedMedia.StartsWith("youtube|", StringComparison.OrdinalIgnoreCase));
         var lastAdd = fake.Commands.LastOrDefault(command => command.Length >= 2 && command[0] == "sub-add");
         Assert.NotNull(lastAdd);
-        Assert.Contains("movie", lastAdd![1], StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(view.Subtitles.Applied?.PlayPath, lastAdd![1]);
+        Assert.Contains("Local line", File.ReadAllText(lastAdd[1]), StringComparison.Ordinal);
         File.Delete(vtt);
         File.Delete(sidecar);
     }
@@ -502,6 +502,36 @@ public sealed class PlaybackViewModelTests
     }
 
     [Fact]
+    public void Protocol_without_sub_still_loads_captions()
+    {
+        var vtt = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".vtt");
+        File.WriteAllText(vtt, "WEBVTT\nLanguage: English\n\n00:00:00.000 --> 00:00:01.000\nBEHIND ME\n");
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        view.ResolveYouTube = _ => new YouTubePlayable(
+            "randomvidxx",
+            "https://manifest.googlevideo.com/api/manifest/hls_variant/vod.m3u8",
+            "Talk",
+            StreamKind.Vod,
+            captionUrl: vtt);
+        view.AddStream(
+            "grokplayer://open?url=" + Uri.EscapeDataString("https://www.youtube.com/watch?v=randomvidxx"),
+            play: true);
+        var until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until && view.Subtitles.Applied is null)
+        {
+            Thread.Sleep(20);
+            host.ProcessPendingEvents();
+        }
+
+        Assert.False(view.Streams.Items[0].SkipCaptions);
+        Assert.NotNull(view.Subtitles.Applied);
+        Assert.Contains("BEHIND ME", view.Subtitles.Applied!.Document.Cues[0].Text, StringComparison.Ordinal);
+        File.Delete(vtt);
+    }
+
+    [Fact]
     public void Stream_without_protocol_langs_does_not_invent_english()
     {
         var fake = new FakeMpvNative();
@@ -619,6 +649,153 @@ public sealed class PlaybackViewModelTests
     }
 
     [Fact]
+    public void Switching_stream_vods_reapplies_each_items_captions()
+    {
+        var first = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".vtt");
+        var second = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".vtt");
+        File.WriteAllText(first, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nFirst vod\n");
+        File.WriteAllText(second, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nSecond vod\n");
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        view.ResolveYouTube = path =>
+        {
+            var one = path.Contains("aaaaaaaaaaa", StringComparison.Ordinal);
+            return new YouTubePlayable(
+                one ? "aaaaaaaaaaa" : "bbbbbbbbbbb",
+                "https://manifest.googlevideo.com/api/manifest/hls_variant/vod.m3u8",
+                one ? "One" : "Two",
+                StreamKind.Vod,
+                captionUrl: one ? first : second);
+        };
+        view.AddStream(
+            "grokplayer://open?url=" + Uri.EscapeDataString("https://www.youtube.com/watch?v=aaaaaaaaaaa") +
+            "&sub=en&caption=" + Uri.EscapeDataString(first),
+            play: true,
+            "One");
+        var until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until && view.Subtitles.Applied?.Document.Cues[0].Text != "First vod")
+        {
+            Thread.Sleep(20);
+            host.ProcessPendingEvents();
+        }
+
+        Assert.Equal("First vod", view.Subtitles.Applied?.Document.Cues[0].Text);
+        view.AddStream(
+            "grokplayer://open?url=" + Uri.EscapeDataString("https://www.youtube.com/watch?v=bbbbbbbbbbb") +
+            "&sub=en&caption=" + Uri.EscapeDataString(second),
+            play: true,
+            "Two");
+        until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until && view.Subtitles.Applied?.Document.Cues[0].Text != "Second vod")
+        {
+            Thread.Sleep(20);
+            host.ProcessPendingEvents();
+        }
+
+        Assert.Equal("Second vod", view.Subtitles.Applied?.Document.Cues[0].Text);
+        view.PlayFrom(view.Streams, 0);
+        host.ProcessPendingEvents();
+        until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until && view.Subtitles.Applied?.Document.Cues[0].Text != "First vod")
+        {
+            Thread.Sleep(20);
+            host.ProcessPendingEvents();
+        }
+
+        Assert.Equal("en", view.PreferredSubLang);
+        Assert.False(view.Streams.Items[0].SkipCaptions);
+        Assert.Equal("First vod", view.Subtitles.Applied?.Document.Cues[0].Text);
+        File.Delete(first);
+        File.Delete(second);
+    }
+
+    [Fact]
+    public void Switching_captioned_youtube_to_direct_live_clears_old_caption_immediately()
+    {
+        var caption = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".vtt");
+        File.WriteAllText(caption, "WEBVTT\n\n00:00:00.000 --> 00:02:00.000\nOld vod caption\n");
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        view.ResolveYouTube = _ => new YouTubePlayable(
+            "aaaaaaaaaaa",
+            "https://manifest.googlevideo.com/api/manifest/hls_variant/vod.m3u8",
+            "Captioned VOD",
+            StreamKind.Vod,
+            captionUrl: caption);
+
+        view.AddStream(
+            "grokplayer://open?url=" + Uri.EscapeDataString("https://www.youtube.com/watch?v=aaaaaaaaaaa") +
+            "&sub=en&caption=" + Uri.EscapeDataString(caption),
+            play: true);
+        var until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until && view.Subtitles.Applied is null)
+        {
+            Thread.Sleep(20);
+            host.ProcessPendingEvents();
+        }
+
+        Assert.Equal("Old vod caption", view.Subtitles.Applied?.Document.Cues[0].Text);
+        var commandCount = fake.Commands.Count;
+
+        view.AddStream("https://example.com/live.m3u8", play: true, "Live");
+
+        Assert.Null(view.Subtitles.Applied);
+        Assert.Null(view.OnScreenCaption);
+        host.ProcessPendingEvents();
+        Assert.Null(view.Subtitles.Applied);
+        Assert.Null(view.OnScreenCaption);
+        Assert.Contains(fake.Commands.Skip(commandCount), command => command.Length >= 1 && command[0] == "sub-remove");
+        File.Delete(caption);
+    }
+
+    [Fact]
+    public void Reopen_same_video_with_translate_replaces_captions()
+    {
+        var turkish = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".vtt");
+        var german = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".vtt");
+        File.WriteAllText(turkish, "WEBVTT\nLanguage: tr\n\n00:00:00.000 --> 00:00:01.000\nMerhaba\n");
+        File.WriteAllText(german, "WEBVTT\nLanguage: de\n\n00:00:00.000 --> 00:00:01.000\nHallo\n");
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        view.ResolveYouTube = _ => new YouTubePlayable(
+            "EzWLUda58k4",
+            "https://manifest.googlevideo.com/api/manifest/hls_variant/vod.m3u8",
+            "GTA",
+            StreamKind.Vod);
+        var watch = "https://www.youtube.com/watch?v=EzWLUda58k4";
+        view.AddStream(
+            "grokplayer://open?url=" + Uri.EscapeDataString(watch) +
+            "&sub=tr:asr&caption=" + Uri.EscapeDataString(turkish),
+            play: true);
+        var until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until && view.Subtitles.Applied?.Document.Cues[0].Text != "Merhaba")
+        {
+            Thread.Sleep(20);
+            host.ProcessPendingEvents();
+        }
+
+        Assert.Equal("Merhaba", view.Subtitles.Applied?.Document.Cues[0].Text);
+        view.AddStream(
+            "grokplayer://open?url=" + Uri.EscapeDataString(watch) +
+            "&sub=de&caption=" + Uri.EscapeDataString(german),
+            play: true);
+        until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until && view.Subtitles.Applied?.Document.Cues[0].Text != "Hallo")
+        {
+            Thread.Sleep(20);
+            host.ProcessPendingEvents();
+        }
+
+        Assert.Equal("de", view.PreferredSubLang);
+        Assert.Equal("Hallo", view.Subtitles.Applied?.Document.Cues[0].Text);
+        File.Delete(turkish);
+        File.Delete(german);
+    }
+
+    [Fact]
     public void Reopen_with_captions_off_clears_previous_subs()
     {
         var vtt = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".vtt");
@@ -646,11 +823,131 @@ public sealed class PlaybackViewModelTests
         host.ProcessPendingEvents();
         Assert.NotNull(view.Subtitles.Applied);
         view.AddStream("grokplayer://open?url=" + Uri.EscapeDataString(watch) + "&audio=tr&sub=off", play: true);
+        Assert.Null(view.Subtitles.Applied);
         host.ProcessPendingEvents();
         Assert.Null(view.Subtitles.Applied);
         Assert.Null(view.OnScreenCaption);
         Assert.Contains(fake.Commands, command => command.Length >= 1 && command[0] == "sub-remove");
         File.Delete(vtt);
+    }
+
+    [Fact]
+    public void Leftover_translate_lang_still_applies_official_captions()
+    {
+        var vtt = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".vtt");
+        File.WriteAllText(
+            vtt,
+            "WEBVTT\nLanguage: English\n\n00:00:00.000 --> 00:00:01.500\nBEHIND ME are ONE HUNDRED cops\n");
+        var store = Path.Combine(Path.GetTempPath(), "stream-subs-" + Guid.NewGuid().ToString("N") + ".json");
+        var settings = new StreamSubtitleSettings { Mode = StreamSubtitleMode.On, Store = store, LastSub = "de" };
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host, streamSubtitles: settings);
+        view.ResolveYouTube = _ => new YouTubePlayable(
+            "qtlcaptionx",
+            "https://manifest.googlevideo.com/api/manifest/hls_variant/vod.m3u8",
+            "Escape",
+            StreamKind.Vod,
+            captionUrl: vtt);
+        view.AddStream("https://www.youtube.com/watch?v=qtlcaptionx&t=159s", play: true);
+        var until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until && view.Subtitles.Applied is null)
+        {
+            Thread.Sleep(20);
+            host.ProcessPendingEvents();
+        }
+
+        Assert.NotNull(view.Subtitles.Applied);
+        Assert.Contains(
+            "BEHIND ME",
+            view.Subtitles.Applied!.Document.Cues[0].Text,
+            StringComparison.Ordinal);
+        File.Delete(vtt);
+        File.Delete(store);
+    }
+
+    [Fact]
+    public void Official_captions_apply_when_opening_a_new_youtube_video()
+    {
+        var vtt = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".vtt");
+        File.WriteAllText(
+            vtt,
+            "WEBVTT\nLanguage: English\n\n00:00:00.000 --> 00:00:01.500\nBEHIND ME are ONE HUNDRED cops\n");
+        var store = Path.Combine(Path.GetTempPath(), "stream-subs-" + Guid.NewGuid().ToString("N") + ".json");
+        var settings = new StreamSubtitleSettings { Mode = StreamSubtitleMode.On, Store = store, LastSub = "de" };
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host, streamSubtitles: settings);
+        view.ResolveYouTube = _ => new YouTubePlayable(
+            "Qtl8lJwbd4g",
+            "https://manifest.googlevideo.com/api/manifest/hls_variant/vod.m3u8",
+            "Escape",
+            StreamKind.Vod,
+            captionUrl: vtt);
+        view.AddStream(
+            "grokplayer://open?url=" +
+            Uri.EscapeDataString("https://www.youtube.com/watch?v=Qtl8lJwbd4g&t=159s") +
+            "&sub=en&caption=" + Uri.EscapeDataString(vtt),
+            play: true);
+        var until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until && view.Subtitles.Applied is null)
+        {
+            Thread.Sleep(20);
+            host.ProcessPendingEvents();
+        }
+
+        Assert.Equal("en", view.PreferredSubLang);
+        Assert.NotNull(view.Subtitles.Applied);
+        Assert.Contains(
+            "BEHIND ME",
+            view.Subtitles.Applied!.Document.Cues[0].Text,
+            StringComparison.Ordinal);
+        File.Delete(vtt);
+        File.Delete(store);
+    }
+
+    [Fact]
+    public void Auto_asr_caption_url_from_protocol_loads()
+    {
+        var vtt = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".vtt");
+        File.WriteAllText(vtt, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nAuto generated\n");
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        view.ResolveYouTube = _ => new YouTubePlayable(
+            "asrvidxxxx1",
+            "https://manifest.googlevideo.com/api/manifest/hls_variant/vod.m3u8",
+            "Talk",
+            StreamKind.Vod);
+        view.AddStream(
+            "grokplayer://open?url=" +
+            Uri.EscapeDataString("https://www.youtube.com/watch?v=asrvidxxxx1") +
+            "&sub=en:asr&caption=" + Uri.EscapeDataString(vtt),
+            play: true);
+        var until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until && view.Subtitles.Applied is null)
+        {
+            Thread.Sleep(20);
+            host.ProcessPendingEvents();
+        }
+
+        Assert.Equal("en:asr", view.PreferredSubLang);
+        Assert.False(view.Streams.Items[0].SkipCaptions);
+        Assert.NotNull(view.Subtitles.Applied);
+        Assert.Equal("Auto generated", view.Subtitles.Applied!.Document.Cues[0].Text);
+        File.Delete(vtt);
+    }
+
+    [Fact]
+    public void Default_subtitle_position_matches_three_down_nudges_from_the_old_default()
+    {
+        var session = Create(open: false);
+        Assert.Equal(100, session.View.SubPos);
+        session.View.NudgeSubPos(-4);
+        Assert.Equal(96, session.View.SubPos);
+        session.View.NudgeSubPos(4);
+        Assert.Equal(100, session.View.SubPos);
+        session.Dispose();
     }
 
     private static Session Create(bool open = true)

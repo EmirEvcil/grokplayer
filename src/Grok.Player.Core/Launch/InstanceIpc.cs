@@ -12,18 +12,20 @@ public sealed class InstanceIpc : IDisposable
     private readonly Mutex _mutex;
     private readonly CancellationTokenSource _cts = new();
     private readonly ConcurrentQueue<string> _queued = new();
+    private readonly object _gate = new();
+    private readonly string _pipeName;
+    private readonly Task _workers;
     private Action<string>? _received;
-    private bool _owns;
     private bool _disposed;
 
-    private InstanceIpc(Mutex mutex, bool owns)
+    private InstanceIpc(Mutex mutex, bool owns, string pipeName, bool pollDrops)
     {
         _mutex = mutex;
-        _owns = owns;
+        _pipeName = pipeName;
+        _workers = Task.CompletedTask;
         if (owns)
         {
-            Task.Run(Listen);
-            Task.Run(PollDrops);
+            _workers = Task.WhenAll(Task.Run(Listen), pollDrops ? Task.Run(PollDrops) : Task.CompletedTask);
         }
     }
 
@@ -31,39 +33,24 @@ public sealed class InstanceIpc : IDisposable
     {
         add
         {
-            _received += value;
-            while (_queued.TryDequeue(out var payload))
+            lock (_gate)
             {
-                value?.Invoke(payload);
+                _received += value;
+                while (_queued.TryDequeue(out var payload)) value?.Invoke(payload);
             }
         }
-        remove => _received -= value;
+        remove { lock (_gate) _received -= value; }
     }
 
-    public static bool TryOwn(out InstanceIpc ipc)
+    public static bool TryOwn(out InstanceIpc ipc) => TryOwn(out ipc, MutexName, PipeName, true);
+
+    internal static bool TryOwn(out InstanceIpc ipc, string mutexName, string pipeName, bool pollDrops = false)
     {
-        var mutex = new Mutex(true, MutexName, out var created);
-        if (!created)
-        {
-            try
-            {
-                created = mutex.WaitOne(0);
-            }
-            catch (AbandonedMutexException)
-            {
-                created = true;
-            }
-        }
-
-        if (!created)
-        {
-            mutex.Dispose();
-            ipc = new InstanceIpc(new Mutex(false, MutexName), false);
-            return false;
-        }
-
-        ipc = new InstanceIpc(mutex, true);
-        return true;
+        // Ownership is the lifetime of the named handle, not a particular UI thread.
+        // A thread-owned mutex may become abandoned during WinUI activation.
+        var mutex = new Mutex(false, mutexName, out var created);
+        ipc = new InstanceIpc(mutex, created, pipeName, pollDrops);
+        return created;
     }
 
     public static bool TrySend(string payload)
@@ -153,19 +140,8 @@ public sealed class InstanceIpc : IDisposable
 
         _disposed = true;
         _cts.Cancel();
-        if (_owns)
-        {
-            try
-            {
-                _mutex.ReleaseMutex();
-            }
-            catch (ApplicationException)
-            {
-            }
-        }
-
         _mutex.Dispose();
-        _cts.Dispose();
+        _ = _workers.ContinueWith(_ => _cts.Dispose(), TaskScheduler.Default);
     }
 
     private void Deliver(string payload)
@@ -175,29 +151,27 @@ public sealed class InstanceIpc : IDisposable
             return;
         }
 
-        var handler = _received;
-        if (handler is null)
+        lock (_gate)
         {
-            _queued.Enqueue(payload);
-            return;
+            if (_received is null) _queued.Enqueue(payload);
+            else _received(payload);
         }
-
-        handler(payload);
     }
 
-    private void Listen()
+    private async Task Listen()
     {
         while (!_cts.IsCancellationRequested)
         {
             try
             {
                 using var pipe = new NamedPipeServerStream(
-                    PipeName,
+                    _pipeName,
                     PipeDirection.In,
-                    NamedPipeServerStream.MaxAllowedServerInstances);
-                pipe.WaitForConnection();
+                    NamedPipeServerStream.MaxAllowedServerInstances,
+                    PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
+                await pipe.WaitForConnectionAsync(_cts.Token);
                 using var reader = new StreamReader(pipe, Encoding.UTF8);
-                Deliver(reader.ReadToEnd());
+                Deliver(await reader.ReadToEndAsync(_cts.Token));
             }
             catch (Exception)
             {

@@ -178,6 +178,14 @@ public sealed class YouTubeCatalogTests
         Assert.True(ExternalOpen.TryParse(dotted, out var dottedLang));
         Assert.Equal("tr", dottedLang.AudioLang);
         Assert.Equal("tr:asr", dottedLang.SubLang);
+        var asr =
+            "grokplayer://open?url=" +
+            Uri.EscapeDataString("https://www.youtube.com/watch?v=WFSdNlLtu7I") +
+            "&sub=en:asr&caption=" +
+            Uri.EscapeDataString("https://www.youtube.com/api/timedtext?v=WFSdNlLtu7I&lang=en&kind=asr");
+        Assert.True(ExternalOpen.TryParse(asr, out var asrOpen));
+        Assert.Equal("en:asr", asrOpen.SubLang);
+        Assert.Contains("kind=asr", asrOpen.CaptionUrl, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -188,6 +196,10 @@ public sealed class YouTubeCatalogTests
         Assert.DoesNotContain("tr.3", url, StringComparison.Ordinal);
         Assert.Contains("fmt=vtt", url, StringComparison.Ordinal);
         Assert.Contains("kind=asr", YouTubeCatalog.CaptionVttUrl("dQw4w9wgBcQ", "tr:asr"), StringComparison.Ordinal);
+        var asrUrls = StreamCaptionLoader.Urls("EzWLUda58k4", "tr:asr", null).ToList();
+        Assert.Contains(asrUrls, item => item.Contains("kind=asr", StringComparison.Ordinal) &&
+                                         item.Contains("lang=tr", StringComparison.Ordinal));
+        Assert.Equal(asrUrls[0], YouTubeCatalog.CaptionVttUrl("EzWLUda58k4", "tr:asr"));
     }
 
     [Fact]
@@ -221,12 +233,22 @@ public sealed class YouTubeCatalogTests
         var any = YouTubeCatalog.ParseCaptionUrl(json, null);
         Assert.NotNull(any);
         Assert.Contains("lang=en", any, StringComparison.OrdinalIgnoreCase);
-        Assert.Null(YouTubeCatalog.PickCaptionUrl(json, null));
+        Assert.Contains("lang=en", YouTubeCatalog.PickCaptionUrl(json, null), StringComparison.OrdinalIgnoreCase);
         Assert.Null(YouTubeCatalog.PickCaptionUrl(json, "off"));
         var missing = YouTubeCatalog.ParseCaptionUrl(json, "de");
         Assert.NotNull(missing);
-        Assert.Contains("lang=en", missing, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("lang=tr", missing, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("tlang=de", missing, StringComparison.OrdinalIgnoreCase);
+        var asrOnly =
+            """
+            {"captions":{"playerCaptionsTracklistRenderer":{"captionTracks":[
+              {"baseUrl":"https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=tr&kind=asr","languageCode":"tr","kind":"asr"}
+            ]}}}
+            """;
+        var translated = YouTubeCatalog.ParseCaptionUrl(asrOnly, "de");
+        Assert.NotNull(translated);
+        Assert.Contains("lang=tr", translated, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("tlang=de", translated, StringComparison.OrdinalIgnoreCase);
         Assert.True(YouTubeCatalog.CaptionUrlMatches("https://www.youtube.com/api/timedtext?v=x&lang=en&fmt=vtt", "en"));
         Assert.True(YouTubeCatalog.CaptionUrlMatches("https://www.youtube.com/api/timedtext?v=x&lang=en&tlang=tr&fmt=vtt", "tr"));
         Assert.False(YouTubeCatalog.CaptionUrlMatches("https://www.youtube.com/api/timedtext?v=x&lang=ar&fmt=vtt", "en"));
@@ -362,10 +384,120 @@ public sealed class YouTubeCatalogTests
         File.WriteAllText(english, "WEBVTT\nLanguage: English\n\n00:00:00.000 --> 00:00:01.000\nHi\n");
         var urls = StreamCaptionLoader.Urls("dQw4w9wgBcQ", "tr", "https://www.youtube.com/api/timedtext?v=x&lang=en&fmt=vtt").ToList();
         Assert.Contains(urls, item => item.Contains("tlang=tr", StringComparison.Ordinal));
-        Assert.DoesNotContain(urls, item => item.Equals("https://www.youtube.com/api/timedtext?v=x&lang=en&fmt=vtt", StringComparison.Ordinal));
+        Assert.Contains("tlang=tr", urls[0], StringComparison.Ordinal);
         var loaded = StreamCaptionLoader.Load("nope", "tr", english);
         Assert.Null(loaded);
         File.Delete(english);
+    }
+
+    [Fact]
+    public void Caption_loader_uses_signed_url_without_language()
+    {
+        var vtt = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".vtt");
+        File.WriteAllText(vtt, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nAuto line\n");
+        var path = StreamCaptionLoader.Load("signedvidxx1", null, vtt);
+        Assert.NotNull(path);
+        Assert.Contains("Auto line", File.ReadAllText(StreamCaptionLoader.DocumentPath(path)), StringComparison.Ordinal);
+        File.Delete(vtt);
+    }
+
+    [Fact]
+    public void Parse_caption_url_prefers_asr_when_requested()
+    {
+        var json =
+            """
+            {"captions":{"playerCaptionsTracklistRenderer":{"captionTracks":[
+              {"baseUrl":"https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=en","languageCode":"en"},
+              {"baseUrl":"https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=en&kind=asr","languageCode":"en","kind":"asr"}
+            ]}}}
+            """;
+        var asr = YouTubeCatalog.ParseCaptionUrl(json, "en:asr");
+        Assert.NotNull(asr);
+        Assert.Contains("kind=asr", asr, StringComparison.Ordinal);
+        var manual = YouTubeCatalog.ParseCaptionUrl(json, "en");
+        Assert.NotNull(manual);
+        Assert.DoesNotContain("kind=asr", manual, StringComparison.Ordinal);
+        Assert.Equal("en:asr", YouTubeCatalog.CaptionLanguageFromUrl(
+            "https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=en&kind=asr&fmt=vtt"));
+        Assert.Equal("en", YouTubeCatalog.CaptionLanguageFromUrl(
+            "https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=tr&kind=asr&tlang=en"));
+        Assert.Equal("tr:asr", YouTubeCatalog.CaptionSourceLanguageFromUrl(
+            "https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=tr&kind=asr&tlang=en"));
+        Assert.True(YouTubeCatalog.CaptionUrlIsTranslate(
+            "https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=tr&kind=asr&tlang=en"));
+    }
+
+    [Fact]
+    public void Caption_loader_does_not_fall_back_to_native_target_for_auto_translate()
+    {
+        var caption =
+            "https://www.youtube.com/api/timedtext?v=fFxbSyTAmBs&lang=tr&kind=asr&tlang=en&fmt=vtt";
+        var urls = StreamCaptionLoader.Urls("fFxbSyTAmBs", "en", caption).ToList();
+        Assert.True(StreamCaptionLoader.IsTranslateRequest("en", caption));
+        Assert.Contains(urls, item => item.Contains("tlang=en", StringComparison.Ordinal) &&
+                                      item.Contains("lang=tr", StringComparison.Ordinal));
+        Assert.DoesNotContain(urls, item =>
+            item.Contains("lang=en", StringComparison.OrdinalIgnoreCase) &&
+            !item.Contains("tlang=", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("tr-asr.en", StreamCaptionLoader.CacheTag("en", caption));
+        Assert.Contains(
+            YouTubeCatalog.CaptionDownloadUrls(caption),
+            item => item.Contains("fmt=srv3", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("en-asr", StreamCaptionLoader.CacheTag("en:asr",
+            "https://www.youtube.com/api/timedtext?v=fFxbSyTAmBs&lang=en&kind=asr&fmt=vtt"));
+        var official = "https://www.youtube.com/api/timedtext?v=Qtl8lJwbd4g&lang=en&fmt=vtt";
+        var officialFmts = YouTubeCatalog.CaptionDownloadUrls(official).ToList();
+        Assert.Contains(officialFmts, item => item.Contains("fmt=srv3", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(officialFmts, item => item.Contains("fmt=vtt", StringComparison.OrdinalIgnoreCase));
+        Assert.True(MediaLanguage.Matches("de", "de-DE"));
+        Assert.Equal("de", MediaLanguage.Normalize("de-DE"));
+        var tlangFmts = YouTubeCatalog.CaptionDownloadUrls(caption).ToList();
+        Assert.StartsWith(YouTubeCatalog.WithCaptionFormat(caption, "srv3"), tlangFmts[0]);
+        Assert.Contains(tlangFmts, item => item.Contains("fmt=srv3", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(tlangFmts, item => item.Contains("fmt=json3", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(YouTubeCatalog.EnsureVtt(caption), tlangFmts[^1]);
+        Assert.Equal(
+            "de",
+            StreamCaptionLoader.EffectiveLanguage(
+                "de",
+                "https://www.youtube.com/api/timedtext?v=Qtl8lJwbd4g&lang=en&fmt=vtt"));
+        Assert.Equal(
+            "tr:asr",
+            StreamCaptionLoader.EffectiveLanguage(
+                "tr:asr",
+                "https://www.youtube.com/api/timedtext?v=EzWLUda58k4&lang=tr&kind=asr&tlang=de&fmt=vtt"));
+        Assert.Equal(
+            "de",
+            StreamCaptionLoader.EffectiveLanguage(
+                "de",
+                "https://www.youtube.com/api/timedtext?v=EzWLUda58k4&lang=tr&kind=asr&fmt=vtt"));
+        var leftover = StreamCaptionLoader.Urls(
+            "Qtl8lJwbd4g",
+            "de",
+            "https://www.youtube.com/api/timedtext?v=Qtl8lJwbd4g&lang=en&tlang=de&fmt=vtt").ToList();
+        Assert.Contains(leftover, item => item.Contains("tlang=de", StringComparison.Ordinal));
+        Assert.DoesNotContain(leftover, item =>
+            item.Contains("lang=en", StringComparison.Ordinal) &&
+            !item.Contains("tlang=", StringComparison.Ordinal));
+        Assert.Equal(
+            "https://www.youtube.com/api/timedtext?v=Qtl8lJwbd4g&lang=en&fmt=vtt",
+            YouTubeCatalog.WithoutTranslate(
+                "https://www.youtube.com/api/timedtext?v=Qtl8lJwbd4g&lang=en&tlang=de&fmt=vtt"));
+    }
+
+    [Fact]
+    public void Caption_loader_does_not_reuse_native_cache_for_a_translation()
+    {
+        var folder = StreamCaptionLoader.CacheDirectory;
+        Directory.CreateDirectory(folder);
+        var id = "xlatcachexx1";
+        var native = Path.Combine(folder, id + ".en.srt");
+        File.WriteAllText(native, "1\n00:00:00,000 --> 00:00:01,000\nNative auto\n");
+        var caption =
+            "https://www.youtube.com/api/timedtext?v=" + id + "&lang=tr&kind=asr&tlang=en";
+        Assert.Null(StreamCaptionLoader.Existing(id, "en", caption));
+        Assert.NotNull(StreamCaptionLoader.Existing(id, "en"));
+        File.Delete(native);
     }
 
     [Fact]

@@ -64,6 +64,27 @@ public sealed class InstanceLaunchArgsTests
     }
 
     [Fact]
+    public void Recovers_a_protocol_url_split_on_ampersands()
+    {
+        var parsed = InstanceLaunchArgs.Parse(
+        [
+            "--stream",
+            "grokplayer://open?url=https://www.youtube.com/watch?v=Qtl8lJwbd4g",
+            "sub=en",
+            "caption=https://www.youtube.com/api/timedtext?v=Qtl8lJwbd4g"
+        ]);
+        Assert.Contains("sub=en", parsed.Path, StringComparison.Ordinal);
+        Assert.Contains("caption=", parsed.Path, StringComparison.Ordinal);
+        Assert.True(ExternalOpen.TryParse(parsed.Path, out var open));
+        Assert.Equal("en", open.SubLang);
+        Assert.Contains("timedtext", open.CaptionUrl, StringComparison.Ordinal);
+
+        var recovered = InstanceLaunchArgs.RecoverProtocol(
+            "\"C:\\\\app\\\\GrokPlayer.exe\" --stream \"grokplayer://open?url=https://youtu.be/x&sub=tr:asr&caption=https://example/vtt\"");
+        Assert.Equal("grokplayer://open?url=https://youtu.be/x&sub=tr:asr&caption=https://example/vtt", recovered);
+    }
+
+    [Fact]
     public void Existing_instance_drop_is_enough_without_a_new_process()
     {
         var dir = InstanceIpc.DropDirectory();

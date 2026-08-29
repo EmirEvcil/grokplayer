@@ -25,4 +25,6 @@ public sealed class SubtitleTrack
     public string PlayPath { get; set; }
 
     public bool IsMerged { get; set; }
+
+    public bool IsEdited { get; set; }
 }

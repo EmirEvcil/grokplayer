@@ -13,12 +13,11 @@ namespace Grok.Player.App.Native;
 
 internal sealed class PreviewFlyout : IDisposable
 {
-    private const int DipWidth = 268;
-    private const int DipHeight = 176;
+    internal const int DipWidth = 268;
+    internal const int DipHeight = 176;
     private readonly Window _window;
     private readonly Grid _frame;
     private readonly Image _image;
-    private readonly StackPanel _loading;
     private readonly TextBlock _time;
     private readonly WndProc _wndProc;
     private string? _path;
@@ -44,37 +43,14 @@ internal sealed class PreviewFlyout : IDisposable
             FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
             Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 240, 201, 58))
         };
-        _loading = new StackPanel
-        {
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            Spacing = 8,
-            Children =
-            {
-                new ProgressRing
-                {
-                    Width = 24,
-                    Height = 24,
-                    IsActive = true,
-                    Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 240, 201, 58))
-                },
-                new TextBlock
-                {
-                    Text = "Loading preview...",
-                    FontSize = 12,
-                    Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 170, 170, 178))
-                }
-            }
-        };
-
         _frame = new Grid
         {
             Width = 256,
             Height = 144,
-            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 10, 10, 12))
+            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 0, 0, 0)),
+            Clip = new RectangleGeometry { Rect = new Windows.Foundation.Rect(0, 0, 256, 144) }
         };
         _frame.Children.Add(_image);
-        _frame.Children.Add(_loading);
         _frame.Children.Add(new Border
         {
             HorizontalAlignment = HorizontalAlignment.Center,
@@ -125,28 +101,34 @@ internal sealed class PreviewFlyout : IDisposable
         var missing = string.IsNullOrWhiteSpace(imagePath) || !File.Exists(imagePath);
         if (missing)
         {
+            // Keep the image area black and full-sized when this time has no
+            // preview. Do not mislabel a previous hover target's image.
             _path = null;
             _loadGeneration++;
             _image.Source = null;
             _image.Visibility = Visibility.Collapsed;
-            _loading.Visibility = Visibility.Visible;
         }
         else
         {
-            _image.Visibility = Visibility.Visible;
-            _loading.Visibility = Visibility.Collapsed;
             if (imagePath is not null && imagePath != _path)
             {
                 _path = imagePath;
                 var generation = ++_loadGeneration;
+                // Never keep the previous hover's bitmap visible while the new
+                // file is being decoded. During continuous pointer movement that
+                // made old high-quality frames appear under unrelated timestamps.
+                _image.Source = null;
+                _image.Visibility = Visibility.Collapsed;
                 _ = LoadImageAsync(imagePath, generation);
+            }
+            else if (_image.Source is not null)
+            {
+                _image.Visibility = Visibility.Visible;
             }
         }
 
-        var dipW = DipWidth;
-        var dipH = DipHeight;
-        var pixelW = Math.Max(1, (int)Math.Round(dipW * scale));
-        var pixelH = Math.Max(1, (int)Math.Round(dipH * scale));
+        var pixelW = Math.Max(1, (int)Math.Round(DipWidth * scale));
+        var pixelH = Math.Max(1, (int)Math.Round(DipHeight * scale));
         if (_window.AppWindow.Size.Width != pixelW || _window.AppWindow.Size.Height != pixelH)
         {
             _window.AppWindow.Resize(new SizeInt32(pixelW, pixelH));
@@ -168,6 +150,7 @@ internal sealed class PreviewFlyout : IDisposable
         _path = null;
         _loadGeneration++;
         _image.Source = null;
+        _image.Visibility = Visibility.Collapsed;
         Hide();
     }
 
@@ -213,6 +196,7 @@ internal sealed class PreviewFlyout : IDisposable
             if (generation == _loadGeneration)
             {
                 _image.Source = bitmap;
+                _image.Visibility = Visibility.Visible;
             }
         }
         catch (Exception)
@@ -220,6 +204,8 @@ internal sealed class PreviewFlyout : IDisposable
             if (generation == _loadGeneration)
             {
                 _path = null;
+                _image.Source = null;
+                _image.Visibility = Visibility.Collapsed;
             }
         }
     }

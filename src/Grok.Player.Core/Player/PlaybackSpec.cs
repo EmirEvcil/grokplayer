@@ -6,6 +6,8 @@ public static class PlaybackSpec
     public const double MaxSpeed = 12;
     public const double DefaultSpeed = 1;
     public const double SpeedStep = 0.1;
+    // The previous 88 plus three 4-point "subtitle down" nudges clamps here.
+    public const int DefaultSubtitlePosition = 100;
 
     public static double ClampSpeed(double value)
     {

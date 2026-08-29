@@ -12,6 +12,60 @@ public sealed class InstanceLaunchArgs
     public bool Cinema { get; init; }
     public bool NewInstance { get; init; }
 
+    public static string? RecoverProtocol(string? commandLine)
+    {
+        if (string.IsNullOrWhiteSpace(commandLine))
+        {
+            return null;
+        }
+
+        var at = commandLine.IndexOf("grokplayer:", StringComparison.OrdinalIgnoreCase);
+        return at < 0 ? null : commandLine[at..].Trim().Trim('"');
+    }
+
+    public InstanceLaunchArgs WithPath(string? path) =>
+        new()
+        {
+            Path = path,
+            Volume = Volume,
+            Mute = Mute,
+            Loop = Loop,
+            AlwaysOnTop = AlwaysOnTop,
+            Cinema = Cinema,
+            NewInstance = NewInstance
+        };
+
+    private static string JoinProtocolTail(string[] list, ref int i)
+    {
+        var path = list[i].Trim('"');
+        if (!path.StartsWith("grokplayer:", StringComparison.OrdinalIgnoreCase) &&
+            !path.Contains("://", StringComparison.Ordinal))
+        {
+            return path;
+        }
+
+        while (i + 1 < list.Length)
+        {
+            var next = list[i + 1];
+            if (next.StartsWith("--", StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            var eq = next.IndexOf('=');
+            if (eq > 0 && next[..eq].All(char.IsLetter))
+            {
+                path += "&" + next;
+                i++;
+                continue;
+            }
+
+            break;
+        }
+
+        return path;
+    }
+
     public static InstanceLaunchArgs Parse(IEnumerable<string> args)
     {
         string? path = null;
@@ -54,12 +108,13 @@ public sealed class InstanceLaunchArgs
             {
                 if (i + 1 < list.Length)
                 {
-                    path = list[++i].Trim('"');
+                    i++;
+                    path = JoinProtocolTail(list, ref i);
                 }
             }
             else if (!item.StartsWith("--", StringComparison.Ordinal) && path is null)
             {
-                path = item.Trim('"');
+                path = JoinProtocolTail(list, ref i);
             }
         }
 

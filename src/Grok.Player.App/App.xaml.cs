@@ -46,36 +46,28 @@ public partial class App : Application
     {
         var argv = Environment.GetCommandLineArgs().Skip(1).ToArray();
         var launch = InstanceLaunchArgs.Parse(argv);
-        if (!launch.NewInstance)
+        var recovered = InstanceLaunchArgs.RecoverProtocol(Environment.CommandLine);
+        if (recovered is not null &&
+            (string.IsNullOrWhiteSpace(launch.Path) || recovered.Length > launch.Path.Length))
         {
-            if (!InstanceIpc.TryOwn(out var ipc))
+            launch = launch.WithPath(recovered);
+        }
+        if (InstanceIpc.TryOwn(out var ipc))
+        {
+            _ipc = ipc;
+        }
+        else
+        {
+            ipc.Dispose();
+            if (!launch.NewInstance)
             {
-                var payload = launch.Path ?? string.Join('\n', argv);
-                if (InstanceIpc.TrySend(payload) || InstanceIpc.TryEnqueueDrop(payload))
-                {
-                    Environment.Exit(0);
-                    return;
-                }
-
-                var exe = Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, "GrokPlayer.exe");
-                try
-                {
-                    Process.Start(new ProcessStartInfo
-                    {
-                        FileName = exe,
-                        ArgumentList = { "--new-instance", "--stream", payload },
-                        UseShellExecute = false
-                    });
-                }
-                catch
-                {
-                }
-
+                var payload = launch.Path ?? "--activate";
+                if (!InstanceIpc.TrySend(payload))
+                    InstanceIpc.TryEnqueueDrop(payload);
+                // IPC failure must not silently turn a normal open into a new instance.
                 Environment.Exit(0);
                 return;
             }
-
-            _ipc = ipc;
         }
 
         ProtocolRegistration.EnsureCurrentUser(Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, "GrokPlayer.exe"));

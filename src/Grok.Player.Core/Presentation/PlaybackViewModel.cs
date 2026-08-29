@@ -32,7 +32,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
     private TimeSpan? _loopB;
     private string _subFont = "Segoe UI";
     private double _subFontSize = 55;
-    private int _subPos = 100;
+    private int _subPos = PlaybackSpec.DefaultSubtitlePosition;
     private int _subShiftX;
     private string? _styleMedia;
     private bool _streamTab;
@@ -657,6 +657,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
     {
         var trimmed = url.Trim();
         var protocol = trimmed.StartsWith("grokplayer:", StringComparison.OrdinalIgnoreCase);
+        string? captionUrl = null;
         if (ExternalOpen.TryParse(trimmed, out var external))
         {
             trimmed = external.Url;
@@ -672,6 +673,8 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             {
                 height = external.Height;
             }
+
+            captionUrl ??= external.CaptionUrl;
         }
 
         if (height > 0)
@@ -684,7 +687,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             _audioLang = MediaLanguage.IsPlausible(MediaLanguage.Normalize(audioLang))
                 ? MediaLanguage.Normalize(audioLang)
                 : null;
-            if (MediaLanguage.IsOff(subLang) || string.IsNullOrWhiteSpace(subLang))
+            if (MediaLanguage.IsOff(subLang))
             {
                 _skipStreamCaptions = true;
                 _subLang = null;
@@ -693,9 +696,20 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             else
             {
                 _skipStreamCaptions = false;
-                _subLang = MediaLanguage.IsPlausible(MediaLanguage.Normalize(subLang))
-                    ? MediaLanguage.Normalize(subLang, keepKind: true)
-                    : null;
+                if (MediaLanguage.IsPlausible(MediaLanguage.Normalize(subLang)))
+                {
+                    _subLang = MediaLanguage.Normalize(subLang, keepKind: true);
+                }
+                else if (!string.IsNullOrWhiteSpace(captionUrl))
+                {
+                    var fromUrl = MediaLanguage.Normalize(
+                        YouTubeCatalog.CaptionLanguageFromUrl(captionUrl),
+                        keepKind: true);
+                    if (fromUrl.Length > 0)
+                    {
+                        _subLang = fromUrl;
+                    }
+                }
             }
 
             StreamSubtitles.LastAudio = _audioLang;
@@ -754,11 +768,21 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
                 item.VideoHeight = HlsPlaylist.NormalizeHeight(height);
             }
 
-            if (protocol || !string.IsNullOrWhiteSpace(audioLang) || !string.IsNullOrWhiteSpace(subLang))
+            if (protocol || !string.IsNullOrWhiteSpace(audioLang) || !string.IsNullOrWhiteSpace(subLang) ||
+                !string.IsNullOrWhiteSpace(captionUrl))
             {
+                var previousSub = item.SubLang;
                 item.AudioLang = _audioLang;
                 item.SubLang = _subLang;
                 item.SkipCaptions = _skipStreamCaptions;
+                if (!string.IsNullOrWhiteSpace(captionUrl))
+                {
+                    item.CaptionUrl = captionUrl;
+                }
+                else if (protocol && !SameCachedLang(previousSub, _subLang))
+                {
+                    item.CaptionUrl = null;
+                }
             }
         }
 
@@ -1267,14 +1291,23 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         {
             if (TrackFitsCurrent(track) || Subtitles.CurrentMedia is null)
             {
+                var serial = Volatile.Read(ref _openSerial);
+                if (_captionAppliedSerial == serial &&
+                    string.Equals(_captionFile, track.PlayPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+
                 if (_player.SetSubtitleFile(track.PlayPath))
                 {
-                    _captionAppliedSerial = Volatile.Read(ref _openSerial);
+                    _captionFile = track.PlayPath;
+                    _captionAppliedSerial = serial;
                 }
             }
             else
             {
                 _player.SetSubtitleFile(null);
+                _captionAppliedSerial = 0;
             }
 
             _player.SetSubDelay(Subtitles.DelaySeconds);
@@ -1455,6 +1488,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             if (!string.IsNullOrWhiteSpace(_contentKey) && _player.State != PlayerState.Opening)
             {
                 Subtitles.BindForMedia(_contentKey);
+                ApplySubtitleTrack();
             }
 
             return;
@@ -1552,10 +1586,13 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
 
-        if (!string.IsNullOrWhiteSpace(item.SubLang))
+        if (!string.IsNullOrWhiteSpace(item.SubLang) || !string.IsNullOrWhiteSpace(item.CaptionUrl))
         {
             _skipStreamCaptions = false;
-            _subLang = MediaLanguage.Normalize(item.SubLang, keepKind: true);
+            if (!string.IsNullOrWhiteSpace(item.SubLang))
+            {
+                _subLang = MediaLanguage.Normalize(item.SubLang, keepKind: true);
+            }
         }
     }
 
@@ -1575,6 +1612,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         _resumeApplied = null;
         _resumeFingerprint = null;
         _contentKey = null;
+        ResetSubtitlePlaybackForMediaSwitch();
         if (resetRetries)
         {
             _streamRetries = 0;
@@ -1601,11 +1639,21 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             if (YouTubeCatalog.IsWatchUrl(path))
             {
                 if (_youtube is not null &&
-                    YouTubeCatalog.TryReadVideoId(path, out var nextId) &&
-                    !string.Equals(_youtube.VideoId, nextId, StringComparison.Ordinal))
+                    YouTubeCatalog.TryReadVideoId(path, out var nextId))
                 {
-                    _youtube = null;
-                    OnPropertyChanged(nameof(StoryboardSpec));
+                    var same = string.Equals(_youtube.VideoId, nextId, StringComparison.Ordinal);
+                    var subChanged = !string.IsNullOrWhiteSpace(item?.SubLang) &&
+                                     !SameCachedLang(item.CachedSubLang ?? item.SubLang, _subLang);
+                    if (!same || subChanged)
+                    {
+                        if (!same)
+                        {
+                            _youtube = null;
+                            OnPropertyChanged(nameof(StoryboardSpec));
+                        }
+
+                        ClearStreamCaptions();
+                    }
                 }
 
                 SetYouTubePending(true);
@@ -1638,12 +1686,15 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         LoadPath(path, StreamKind.Unknown, null, null);
     }
 
+    private static int PlaybackHeight(PlaylistItem? item) =>
+        item is { VideoHeight: >= 1440 } ? item.VideoHeight : 1080;
+
     private void OpenYouTube(string path, PlaylistItem? item, int serial)
     {
         var audioLang = _audioLang;
         var subLang = _subLang;
         var loadCaptions = StreamSubtitles.Enabled && !_skipStreamCaptions;
-        var height = item is { VideoHeight: > 0 } ? item.VideoHeight : 0;
+        var height = PlaybackHeight(item);
         if (CanReplayCached(item, audioLang, subLang, height))
         {
             var cached = ReplayCached(item, path);
@@ -1654,14 +1705,24 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
                     item,
                     cached,
                     serial,
-                    loadCaptions ? StreamCaptionLoader.Existing(cached.VideoId, subLang ?? cached.SubLang) : null);
+                    loadCaptions ? StreamCaptionLoader.Existing(cached.VideoId, subLang ?? cached.SubLang, item?.CaptionUrl ?? cached.CaptionUrl) : null);
                 return;
             }
         }
 
         if (ResolveYouTube is { } hook)
         {
-            ApplyYouTube(path, item, hook(path), serial, null);
+            var hooked = hook(path);
+            string? existing = null;
+            if (loadCaptions && hooked is not null)
+            {
+                var attached = item?.CaptionUrl ?? hooked.CaptionUrl;
+                existing = File.Exists(attached)
+                    ? attached
+                    : StreamCaptionLoader.Existing(hooked.VideoId, subLang ?? hooked.SubLang, attached);
+            }
+
+            ApplyYouTube(path, item, hooked, serial, existing);
             return;
         }
 
@@ -1678,10 +1739,20 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
                     playable = YouTubeCatalog.BindHlsRenditions(playable, height);
                     if (loadCaptions)
                     {
-                        caption = StreamCaptionLoader.Load(
-                            playable.VideoId,
-                            subLang ?? playable.SubLang,
-                            playable.CaptionUrl);
+                        var attached = item?.CaptionUrl ?? playable.CaptionUrl;
+                        var lang = StreamCaptionLoader.EffectiveLanguage(subLang ?? playable.SubLang, attached);
+                        var existing = StreamCaptionLoader.Existing(playable.VideoId, lang, attached);
+                        if (existing is not null &&
+                            StreamCaptionLoader.CacheMatches(existing, MediaLanguage.Normalize(lang)))
+                        {
+                            caption = existing;
+                        }
+                        else
+                        {
+                            // Resolve the small caption payload before playback so
+                            // the first spoken line does not appear seconds late.
+                            caption = StreamCaptionLoader.Load(playable.VideoId, lang, attached);
+                        }
                     }
                 }
             }
@@ -1714,7 +1785,23 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
 
-        item?.RememberPlayable(playable, item.VideoHeight, _audioLang, _subLang);
+        var captionUrl = item?.CaptionUrl ?? playable.CaptionUrl;
+        if (!string.IsNullOrWhiteSpace(item?.CaptionUrl))
+        {
+            playable = playable.WithCaption(item.CaptionUrl);
+        }
+
+        var loadLang = StreamCaptionLoader.EffectiveLanguage(_subLang ?? playable.SubLang, captionUrl);
+        if (string.IsNullOrWhiteSpace(captionFile) && File.Exists(captionUrl))
+        {
+            var matches = StreamCaptionLoader.CacheMatches(captionUrl, MediaLanguage.Normalize(loadLang));
+            if (matches || !YouTubeCatalog.CaptionUrlIsTranslate(captionUrl))
+            {
+                captionFile = captionUrl;
+            }
+        }
+
+        item?.RememberPlayable(playable, PlaybackHeight(item), _audioLang, _subLang);
         _contentKey = "youtube|" + playable.VideoId;
         item?.SetTitle(playable.Title);
         if (item is not null)
@@ -1728,7 +1815,9 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             _audioLang = MediaLanguage.Normalize(playable.AudioLang);
         }
 
-        if (!_skipStreamCaptions && !string.IsNullOrWhiteSpace(playable.SubLang))
+        if (!_skipStreamCaptions &&
+            string.IsNullOrWhiteSpace(_subLang) &&
+            !string.IsNullOrWhiteSpace(playable.SubLang))
         {
             _subLang = MediaLanguage.Normalize(playable.SubLang, keepKind: true);
         }
@@ -1737,11 +1826,22 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         OnPropertyChanged(nameof(StoryboardSpec));
         if (_skipStreamCaptions || !StreamSubtitles.Enabled)
         {
-            ClearStreamCaptions();
+            if (_skipStreamCaptions)
+            {
+                // Record the explicit off choice against the newly resolved
+                // content key. During a fast reopen the subtitle model may not
+                // have received the prior MediaOpened binding yet.
+                Subtitles.BindForMedia(_contentKey);
+            }
+
+            ClearStreamCaptions(userOff: _skipStreamCaptions);
         }
         else
         {
-            _captionFile = captionFile ?? StreamCaptionLoader.Existing(playable.VideoId, _subLang ?? playable.SubLang);
+            _captionFile = captionFile ?? StreamCaptionLoader.Existing(
+                playable.VideoId,
+                loadLang,
+                item?.CaptionUrl ?? playable.CaptionUrl);
         }
 
         _captionAppliedSerial = 0;
@@ -1758,18 +1858,16 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         {
             Note("Audio " + (_audioLang ?? "auto") + " · Subtitles " + (_subLang ?? "off"));
         }
-        if (StreamSubtitles.Enabled &&
-            !_skipStreamCaptions &&
-            string.IsNullOrWhiteSpace(captionFile) &&
-            string.IsNullOrWhiteSpace(_captionFile))
-        {
-            StartCaptionLoad(playable);
-        }
-        else if (StreamSubtitles.Enabled && !_skipStreamCaptions && !string.IsNullOrWhiteSpace(_captionFile))
+        if (StreamSubtitles.Enabled && !_skipStreamCaptions && !string.IsNullOrWhiteSpace(_captionFile))
         {
             Subtitles.AddFile(_captionFile, apply: true, attachTo: "youtube|" + playable.VideoId);
             Subtitles.BindForMedia(_contentKey);
             ShowPendingCaption();
+        }
+
+        if (StreamSubtitles.Enabled && !_skipStreamCaptions && Subtitles.Applied is null)
+        {
+            StartCaptionLoad(playable);
         }
 
         SetYouTubePending(false);
@@ -1852,10 +1950,10 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
     private void StartCaptionLoad(YouTubePlayable playable)
     {
         var serial = Volatile.Read(ref _openSerial);
-        var lang = _subLang ?? playable.SubLang;
+        var item = CurrentItem();
+        var captionUrl = item?.CaptionUrl ?? playable.CaptionUrl;
+        var lang = StreamCaptionLoader.EffectiveLanguage(_subLang ?? playable.SubLang, captionUrl);
         var id = playable.VideoId;
-        var captionUrl = playable.CaptionUrl;
-        var media = playable.MediaUrl;
         ThreadPool.QueueUserWorkItem(_ =>
         {
             string? file;
@@ -1890,17 +1988,29 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         });
     }
 
-    private void ClearStreamCaptions()
+    private void ClearStreamCaptions(bool userOff = false)
     {
         _captionFile = null;
         if (Subtitles.Applied is not null)
         {
-            Subtitles.Disable();
+            Subtitles.Disable(rememberOff: userOff);
         }
         else
         {
             _player.SetSubtitleFile(null);
         }
+    }
+
+    private void ResetSubtitlePlaybackForMediaSwitch()
+    {
+        // Detach the outgoing media's subtitle immediately. Keeping the model
+        // bound until the next stream finishes opening lets its cues render on
+        // the new media's timeline (most visibly when switching VOD -> live).
+        _captionFile = null;
+        _captionAppliedSerial = 0;
+        _player.SetSubtitleFile(null);
+        Subtitles.BindForMedia(null);
+        OnPropertyChanged(nameof(OnScreenCaption));
     }
 
     private void ShowPendingCaption()

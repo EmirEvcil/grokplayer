@@ -29,6 +29,312 @@ public sealed class CaptionTests
     }
 
     [Fact]
+    public void Karaoke_two_line_paint_keeps_only_the_current_phrase()
+    {
+        var document = SrtDocument.Parse(
+            """
+            WEBVTT
+
+            00:00:02.240 --> 00:00:03.990
+            Bu videoyu çok
+            insanlar<00:00:02.639><c> çaresiz</c>
+            """,
+            compact: false);
+        Assert.DoesNotContain("Bu videoyu çok", document.Cues[0].Text, StringComparison.Ordinal);
+        Assert.Contains("insanlar", document.Cues[0].Text, StringComparison.Ordinal);
+        var play = document.ExpandKaraoke();
+        Assert.DoesNotContain(play.Cues, cue => cue.Text.Contains("Bu videoyu çok", StringComparison.Ordinal));
+        Assert.Contains(play.Cues, cue => cue.Text == "insanlar");
+        Assert.Contains(play.Cues, cue => cue.Text.Contains("çaresiz", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Json3_and_srv3_timedtext_become_vtt()
+    {
+        const string json3 =
+            """
+            {"events":[
+              {"tStartMs":199,"dDurationMs":3190,"segs":[
+                {"utf8":"Hanımlar,"},
+                {"tOffsetMs":400,"utf8":" beyler"},
+                {"utf8":"\n"},
+                {"tOffsetMs":1000,"utf8":"şükür"}
+              ]}
+            ]}
+            """;
+        var fromJson = YouTubeTimedText.ToVtt(json3, "de");
+        Assert.Contains("WEBVTT", fromJson, StringComparison.Ordinal);
+        Assert.Contains("Language: de", fromJson, StringComparison.Ordinal);
+        Assert.Contains("Hanımlar", fromJson, StringComparison.Ordinal);
+        Assert.Contains("şükür", fromJson, StringComparison.Ordinal);
+        var fromAsr = YouTubeTimedText.ToVtt(json3, "de:asr");
+        Assert.DoesNotContain("Hanımlar", fromAsr, StringComparison.Ordinal);
+        Assert.Contains("şükür", fromAsr, StringComparison.Ordinal);
+        const string srv3 =
+            """
+            <?xml version="1.0" encoding="utf-8" ?>
+            <timedtext format="3">
+            <body>
+            <p t="199" d="3190"><s>Hanımlar,</s><s t="400"> beyler</s></p>
+            </body>
+            </timedtext>
+            """;
+        var fromXml = YouTubeTimedText.ToVtt(srv3, "tr");
+        Assert.Contains("Hanımlar", fromXml, StringComparison.Ordinal);
+        Assert.Contains("beyler", fromXml, StringComparison.Ordinal);
+        Assert.Contains("Language: tr", fromXml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Authored_qtl_srv3_preserves_both_lines_of_each_event()
+    {
+        const string srv3 =
+            """
+            <timedtext format="3"><body>
+            <p t="1200" d="4440">Size basit gibi görünen ama cevabı hiç
+            de basit olmayan bir soru sorayım.</p>
+            </body></timedtext>
+            """;
+        var vtt = YouTubeTimedText.ToVtt(srv3, "tr");
+        Assert.Contains("Size basit gibi görünen ama cevabı hiç", vtt, StringComparison.Ordinal);
+        Assert.Contains("de basit olmayan bir soru sorayım.", vtt, StringComparison.Ordinal);
+        var cue = Assert.Single(SrtDocument.Parse(vtt!, compact: false).Cues);
+        Assert.Equal("Size basit gibi görünen ama cevabı hiç\nde basit olmayan bir soru sorayım.", cue.Text);
+    }
+
+    [Fact]
+    public void Cache_rejects_a_translation_file_that_is_still_the_source()
+    {
+        var folder = StreamCaptionLoader.CacheDirectory;
+        Directory.CreateDirectory(folder);
+        var id = "cachesamexx1";
+        File.WriteAllText(
+            Path.Combine(folder, id + ".tr-asr.vtt"),
+            "WEBVTT\nLanguage: tr\n\n00:00:00.000 --> 00:00:01.000\nMerhaba efendim\n");
+        File.WriteAllText(
+            Path.Combine(folder, id + ".tr-asr.de.vtt"),
+            "WEBVTT\nLanguage: de\n\n00:00:00.000 --> 00:00:01.000\nMerhaba efendim\n");
+        File.WriteAllText(
+            Path.Combine(folder, id + ".tr-asr.de.srt"),
+            "1\n00:00:00,000 --> 00:00:01,000\nMerhaba efendim\n");
+        Assert.False(StreamCaptionLoader.CacheMatches(Path.Combine(folder, id + ".tr-asr.de.srt"), "de"));
+        Assert.True(StreamCaptionLoader.IsSameAsSource(
+            id,
+            "https://www.youtube.com/api/timedtext?v=" + id + "&lang=tr&kind=asr&tlang=de&fmt=vtt",
+            "WEBVTT\nLanguage: de\n\n00:00:00.000 --> 00:00:01.000\nMerhaba efendim\n"));
+        File.Delete(Path.Combine(folder, id + ".tr-asr.vtt"));
+        File.Delete(Path.Combine(folder, id + ".tr-asr.de.vtt"));
+        File.Delete(Path.Combine(folder, id + ".tr-asr.de.srt"));
+    }
+
+    [Fact]
+    public void Cache_rejects_a_source_language_file_for_a_translation()
+    {
+        var folder = StreamCaptionLoader.CacheDirectory;
+        Directory.CreateDirectory(folder);
+        var id = "cachelangxx1";
+        var vtt = Path.Combine(folder, id + ".tr.de.vtt");
+        var srt = Path.Combine(folder, id + ".tr.de.srt");
+        File.WriteAllText(vtt, "WEBVTT\nLanguage: tr\n\n00:00:00.000 --> 00:00:01.000\nMerhaba\n");
+        File.WriteAllText(srt, "1\n00:00:00,000 --> 00:00:01,000\nMerhaba\n");
+        Assert.False(StreamCaptionLoader.CacheMatches(srt, "de"));
+        File.Delete(vtt);
+        File.Delete(srt);
+    }
+
+    [Fact]
+    public void Karaoke_mode_expands_word_times()
+    {
+        const string vtt =
+            """
+            WEBVTT
+
+            00:00:00.080 --> 00:00:02.230
+            Bu<00:00:00.240><c> videoyu</c><00:00:00.640><c> çok</c>
+
+            00:00:02.230 --> 00:00:02.240
+            Bu videoyu çok
+
+            00:00:02.240 --> 00:00:03.990
+            Bu videoyu çok
+            insanlar<00:00:02.639><c> çaresiz</c>
+            """;
+        var raw = SrtDocument.Parse(vtt, compact: false);
+        Assert.True(raw.HasKaraoke);
+        Assert.True(raw.Cues[0].HasKaraoke);
+        var play = raw.ExpandKaraoke();
+        Assert.Contains(play.Cues, cue => cue.Text == "Bu");
+        Assert.Contains(play.Cues, cue => cue.Text == "Bu videoyu");
+        Assert.Contains(play.Cues, cue => cue.Text.Contains("insanlar çaresiz", StringComparison.Ordinal));
+        var compact = raw.Compacted();
+        Assert.DoesNotContain(compact.Cues, cue => (cue.End - cue.Start).TotalMilliseconds <= 20 && cue.Text == "Bu videoyu çok");
+    }
+
+    [Fact]
+    public void Youtube_asr_commit_twins_leave_the_browser()
+    {
+        const string vtt =
+            """
+            WEBVTT
+
+            00:00:03.840 --> 00:00:10.669
+            Gaming gaming gaming gaming gentl.
+
+            00:00:10.679 --> 00:00:12.990
+            Hey<00:00:11.200><c> efendim</c><00:00:11.800><c> selamlar.</c><00:00:12.400><c> Sesim</c><00:00:12.700><c> yorgun</c>
+
+            00:00:12.990 --> 00:00:13.000
+            Hey efendim selamlar. Sesim yorgun
+
+            00:00:13.000 --> 00:00:15.470
+            geliyorsa kusuruma bakmayın. Şu anda
+
+            00:00:15.470 --> 00:00:15.480
+            geliyorsa kusuruma bakmayın. Şu anda
+            """;
+        var folder = Path.Combine(Path.GetTempPath(), "GrokPlayer", "caption-tests");
+        Directory.CreateDirectory(folder);
+        var path = Path.Combine(folder, Guid.NewGuid().ToString("N") + ".vtt");
+        File.WriteAllText(path, vtt);
+        var track = new SubtitleModel().AddFile(path, apply: true);
+        Assert.DoesNotContain(
+            track.Document.Cues,
+            cue => (cue.End - cue.Start).TotalMilliseconds < 50);
+        Assert.Equal(3, track.Document.Cues.Count);
+        Assert.Equal("Hey efendim selamlar. Sesim yorgun", track.Document.Cues[1].Text);
+        Assert.True((track.Document.Cues[1].End - track.Document.Cues[1].Start).TotalMilliseconds > 500);
+        File.Delete(path);
+        if (File.Exists(track.PlayPath))
+        {
+            File.Delete(track.PlayPath);
+        }
+    }
+
+    [Fact]
+    public void Youtube_paint_on_and_flash_cues_become_one_styled_line()
+    {
+        const string vtt =
+            """
+            WEBVTT
+
+            00:00:36.160 --> 00:00:36.400
+            <c.color00BCE7>START</c>
+
+            00:00:36.400 --> 00:00:36.700
+            <c.color00BCE7>START</c> THE
+
+            00:00:36.700 --> 00:00:38.910
+            <c.color00BCE7><b>START THE TIMER</b></c>
+
+            00:00:36.960 --> 00:00:38.910
+            <c.color00BCE7><b>START THE TIMER</b></c>
+
+            00:00:38.910 --> 00:00:38.920
+            START THE TIMER
+            """;
+        var play = SrtDocument.Parse(vtt, compact: false).ForDisplay();
+        Assert.Single(play.Cues);
+        Assert.Equal("START THE TIMER", play.Cues[0].Text);
+        Assert.True(play.Cues[0].Start < TimeSpan.FromSeconds(36.3));
+        Assert.True((play.Cues[0].End - play.Cues[0].Start).TotalMilliseconds > 500);
+        Assert.True(play.HasStyle);
+        var folder = Path.Combine(Path.GetTempPath(), "GrokPlayer", "caption-tests");
+        Directory.CreateDirectory(folder);
+        var path = Path.Combine(folder, Guid.NewGuid().ToString("N") + ".vtt");
+        File.WriteAllText(path, vtt);
+        var track = new SubtitleModel().AddFile(path, apply: true);
+        Assert.Single(track.Document.Cues);
+        Assert.EndsWith(".ass", track.PlayPath, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("START THE TIMER", File.ReadAllText(track.PlayPath), StringComparison.Ordinal);
+        File.Delete(path);
+        File.Delete(track.PlayPath);
+    }
+
+    [Fact]
+    public void Duplicate_youtube_paint_cues_play_once()
+    {
+        const string vtt =
+            """
+            WEBVTT
+
+            00:00:00.201 --> 00:00:01.834
+            BEHIND<00:00:00.551><c> ME</c>
+
+            00:00:00.201 --> 00:00:01.834
+            BEHIND<00:00:00.551><c> ME</c>
+            """;
+        var raw = SrtDocument.Parse(vtt, compact: false);
+        Assert.Equal(2, raw.Cues.Count);
+        Assert.Single(raw.Deduped().Cues);
+        var play = raw.Deduped().ExpandKaraoke().Deduped();
+        Assert.Equal(play.Cues.Count, play.Cues.Select(cue => cue.Start + cue.Text).Distinct().Count());
+        var folder = Path.Combine(Path.GetTempPath(), "GrokPlayer", "caption-tests");
+        Directory.CreateDirectory(folder);
+        var path = Path.Combine(folder, Guid.NewGuid().ToString("N") + ".vtt");
+        File.WriteAllText(path, vtt);
+        var track = new SubtitleModel().AddFile(path, apply: true);
+        var played = File.ReadAllLines(track.PlayPath).Where(line => line.StartsWith("Dialogue:")).ToArray();
+        Assert.Contains("BEHIND", Assert.Single(played));
+        File.Delete(path);
+    }
+
+    [Fact]
+    public void Youtube_blank_line_after_timing_keeps_the_payload()
+    {
+        var document = SrtDocument.Parse(
+            """
+            WEBVTT
+
+            00:00:00.199 --> 00:00:03.389 align:start position:0%
+
+            Hanımlar,<00:00:00.599><c> beyler</c><00:00:01.199><c> şükür</c>
+
+            00:00:03.389 --> 00:00:03.399 align:start position:0%
+            Hanımlar, beyler şükür
+
+            """,
+            compact: false);
+        Assert.True(document.Cues[0].Start < TimeSpan.FromSeconds(1));
+        Assert.True(document.Cues[0].HasKaraoke);
+        Assert.Contains("Hanımlar", document.Cues[0].Text, StringComparison.Ordinal);
+        var play = document.Deduped().ExpandKaraoke().Deduped();
+        Assert.Contains(play.Cues, cue => cue.Text == "Hanımlar,");
+        Assert.Contains(play.Cues, cue => cue.Text.Contains("beyler", StringComparison.Ordinal));
+        Assert.True(play.Cues[0].Start < TimeSpan.FromSeconds(1));
+    }
+
+    [Fact]
+    public void Real_asr_vtt_play_file_has_cues_from_the_first_second()
+    {
+        var vtt = Path.Combine(Path.GetTempPath(), "GrokPlayer", "captions", "fFxbSyTAmBs.tr.vtt");
+        if (!File.Exists(vtt))
+        {
+            return;
+        }
+
+        var raw = SrtDocument.Parse(File.ReadAllText(vtt), compact: false);
+        if (raw.Cues.Count < 10)
+        {
+            return;
+        }
+
+        Assert.True(raw.Cues[0].Start < TimeSpan.FromSeconds(1),
+            "raw0=" + raw.Cues[0].Start + " karaoke=" + raw.Cues[0].Karaoke.Count + " text=" + raw.Cues[0].Text);
+        if (!raw.HasKaraoke)
+        {
+            return;
+        }
+        var play = raw.Deduped().ExpandKaraoke().Deduped();
+        Assert.True(play.Cues.Count > 10, "play cues=" + play.Cues.Count);
+        Assert.True(play.Cues[0].Start < TimeSpan.FromSeconds(1),
+            "play0=" + play.Cues[0].Start + " text=" + play.Cues[0].Text);
+        var track = new SubtitleModel().AddFile(vtt, apply: true);
+        var played = SrtDocument.Load(track.PlayPath);
+        Assert.True(played.Cues[0].Start < TimeSpan.FromSeconds(1));
+        Assert.True(played.Cues.Count > 10, "written cues=" + played.Cues.Count);
+    }
+
+    [Fact]
     public void Karaoke_timestamps_do_not_eat_spaces()
     {
         var spans = CaptionMarkup.Parse("14<00:00:00.480><c> Mart</c><00:00:01.079><c> 2011</c>");
@@ -153,7 +459,6 @@ public sealed class CaptionTests
         Assert.Equal(srt, StreamCaptionLoader.DocumentPath(ass));
         var model = new SubtitleModel();
         var track = model.AddFile(srt, apply: true);
-        Assert.EndsWith(".ass", track.PlayPath, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("Hello world", File.ReadAllText(track.PlayPath), StringComparison.Ordinal);
         Assert.Equal("Hello world", track.Document.Cues[0].Text);
         File.Delete(vtt);

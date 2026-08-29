@@ -99,9 +99,15 @@ public sealed class StoryboardSpec
         Levels
             .Where(level => level.Width >= 80)
             .OrderByDescending(level => level.Width)
-            .ThenByDescending(level => level.IntervalMs)
+            .ThenBy(level => level.IntervalMs)
             .FirstOrDefault() ??
         Levels.LastOrDefault();
+
+    public StoryboardLevel? FastLevel =>
+        Levels.Where(level => level.Width >= 120)
+            .OrderBy(level => Math.Abs(level.Width - 160))
+            .ThenBy(level => level.Width)
+            .FirstOrDefault() ?? BestLevel;
 
     public static StoryboardSpec? Parse(string? spec)
     {

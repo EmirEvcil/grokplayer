@@ -1,5 +1,6 @@
 using Grok.Player.Core.Media;
 using Grok.Player.Core.Playlist;
+using Grok.Player.Core.Subtitles;
 
 namespace Grok.Player.Core.Download;
 
@@ -10,6 +11,7 @@ public sealed class DownloadManager : IDisposable
     private readonly Dictionary<string, CancellationTokenSource> _tokens = [];
     private readonly HttpClient _http;
     private bool _disposed;
+    private long _lastProgress;
 
     public DownloadManager(DownloadSettings? settings = null, HttpMessageHandler? handler = null)
     {
@@ -58,12 +60,26 @@ public sealed class DownloadManager : IDisposable
         return ext is ".mp4" or ".mkv" or ".webm" or ".mov" or ".m4v" or ".avi";
     }
 
-    public DownloadJob Enqueue(string sourceUrl, string title, bool start, string? audioLang = null, int maxHeight = 0)
+    public DownloadJob Enqueue(
+        string sourceUrl,
+        string title,
+        bool start,
+        string? audioLang = null,
+        int maxHeight = 0,
+        string? subLang = null,
+        string? captionUrl = null)
     {
-        return EnqueueCore(sourceUrl, title, start, audioLang, maxHeight);
+        return EnqueueCore(sourceUrl, title, start, audioLang, maxHeight, subLang, captionUrl);
     }
 
-    public DownloadJob EnqueueCore(string sourceUrl, string title, bool start, string? audioLang, int maxHeight = 0)
+    public DownloadJob EnqueueCore(
+        string sourceUrl,
+        string title,
+        bool start,
+        string? audioLang,
+        int maxHeight = 0,
+        string? subLang = null,
+        string? captionUrl = null)
     {
         Directory.CreateDirectory(Settings.Folder);
         var name = DownloadJob.SafeFileName(title);
@@ -71,7 +87,9 @@ public sealed class DownloadManager : IDisposable
         var job = new DownloadJob(sourceUrl, title, path)
         {
             AudioLang = audioLang,
-            MaxHeight = maxHeight > 0 ? maxHeight : Settings.MaxHeight
+            MaxHeight = maxHeight > 0 ? maxHeight : Settings.MaxHeight,
+            SubLang = subLang,
+            CaptionUrl = captionUrl
         };
         lock (_gate)
         {
@@ -133,7 +151,12 @@ public sealed class DownloadManager : IDisposable
         }
 
         Raise();
-        ThreadPool.QueueUserWorkItem(_ => Run(job, cts.Token));
+        new Thread(() => Run(job, cts.Token))
+        {
+            IsBackground = true,
+            Name = "vod-download",
+            Priority = ThreadPriority.BelowNormal
+        }.Start();
     }
 
     public void Pause(string id)
@@ -282,6 +305,11 @@ public sealed class DownloadManager : IDisposable
                 source = playable.MediaUrl;
                 userAgent = playable.UserAgent;
                 job.AudioLang ??= playable.AudioLang;
+                job.CaptionUrl ??= playable.CaptionUrl;
+                if (string.IsNullOrWhiteSpace(job.SubLang))
+                {
+                    job.SubLang = playable.SubLang;
+                }
             }
 
             if (token.IsCancellationRequested)
@@ -296,6 +324,11 @@ public sealed class DownloadManager : IDisposable
             else
             {
                 DownloadFile(job, source, userAgent, token);
+            }
+
+            if (job.State == DownloadState.Running)
+            {
+                AttachCaptions(job);
             }
 
             lock (_gate)
@@ -448,11 +481,11 @@ public sealed class DownloadManager : IDisposable
         using var output = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read);
         if (map is not null)
         {
-            Write(output, GetBytes(map, userAgent, token));
+            CopySegment(output, map, userAgent, token);
             if (updateProgress)
             {
                 job.SegmentsDone++;
-                Raise();
+                RaiseProgress();
             }
         }
 
@@ -460,13 +493,12 @@ public sealed class DownloadManager : IDisposable
         {
             token.ThrowIfCancellationRequested();
             ThrowIfPaused(job);
-            var bytes = GetBytes(segment.Url, userAgent, token, segment.RangeStart, segment.RangeLength);
-            Write(output, bytes);
+            var bytes = CopySegment(output, segment.Url, userAgent, token, segment.RangeStart, segment.RangeLength);
             if (updateProgress)
             {
-                job.Bytes += bytes.Length;
+                job.Bytes += bytes;
                 job.SegmentsDone++;
-                Raise();
+                RaiseProgress();
             }
         }
     }
@@ -478,6 +510,7 @@ public sealed class DownloadManager : IDisposable
         using var response = _http.Send(request, HttpCompletionOption.ResponseHeadersRead, token);
         response.EnsureSuccessStatusCode();
         job.TotalBytes = response.Content.Headers.ContentLength ?? 0;
+        job.Bytes = 0;
         using var input = response.Content.ReadAsStream(token);
         using var output = new FileStream(job.OutputPath, FileMode.Create, FileAccess.Write, FileShare.Read);
         var buffer = new byte[64 * 1024];
@@ -490,7 +523,7 @@ public sealed class DownloadManager : IDisposable
             job.Bytes += read;
             if (job.Bytes % (512 * 1024) < read)
             {
-                Raise();
+                RaiseProgress();
             }
         }
     }
@@ -524,6 +557,40 @@ public sealed class DownloadManager : IDisposable
     }
 
     private static void Write(Stream output, byte[] bytes) => output.Write(bytes, 0, bytes.Length);
+
+    private long CopySegment(Stream output, string url, string? userAgent, CancellationToken token,
+        long? rangeStart = null, int? rangeLength = null)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        ApplyHeaders(request, userAgent);
+        if (rangeStart is { } start && rangeLength is { } length)
+            request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(start, start + length - 1);
+        using var response = _http.Send(request, HttpCompletionOption.ResponseHeadersRead, token);
+        response.EnsureSuccessStatusCode();
+        using var input = response.Content.ReadAsStream(token);
+        var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(64 * 1024);
+        long total = 0;
+        try
+        {
+            int read;
+            while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                token.ThrowIfCancellationRequested();
+                output.Write(buffer, 0, read);
+                total += read;
+            }
+            return total;
+        }
+        finally { System.Buffers.ArrayPool<byte>.Shared.Return(buffer); }
+    }
+
+    private void RaiseProgress()
+    {
+        var now = Environment.TickCount64;
+        var previous = Interlocked.Read(ref _lastProgress);
+        if (now - previous >= 250 && Interlocked.CompareExchange(ref _lastProgress, now, previous) == previous)
+            Raise();
+    }
 
     private static void ThrowIfPaused(DownloadJob job)
     {
@@ -576,10 +643,55 @@ public sealed class DownloadManager : IDisposable
         return path;
     }
 
+    private static void AttachCaptions(DownloadJob job)
+    {
+        if (MediaLanguage.IsOff(job.SubLang) && string.IsNullOrWhiteSpace(job.CaptionUrl))
+        {
+            return;
+        }
+
+        YouTubeCatalog.TryReadVideoId(job.SourceUrl, out var videoId);
+        if (string.IsNullOrWhiteSpace(videoId) && string.IsNullOrWhiteSpace(job.CaptionUrl))
+        {
+            return;
+        }
+
+        var loaded = StreamCaptionLoader.Load(videoId, job.SubLang, job.CaptionUrl);
+        if (string.IsNullOrWhiteSpace(loaded))
+        {
+            return;
+        }
+
+        var document = StreamCaptionLoader.DocumentPath(loaded);
+        var destSrt = Path.ChangeExtension(job.OutputPath, ".srt");
+        var destVtt = Path.ChangeExtension(job.OutputPath, ".vtt");
+        if (document.EndsWith(".vtt", StringComparison.OrdinalIgnoreCase) && File.Exists(document))
+        {
+            File.Copy(document, destVtt, overwrite: true);
+        }
+
+        if (loaded.EndsWith(".srt", StringComparison.OrdinalIgnoreCase) && File.Exists(loaded))
+        {
+            File.Copy(loaded, destSrt, overwrite: true);
+            return;
+        }
+
+        if (!File.Exists(document))
+        {
+            return;
+        }
+
+        var parsed = SrtDocument.Parse(File.ReadAllText(document), compact: false).Compacted();
+        if (parsed.Cues.Count > 0)
+        {
+            parsed.Save(destSrt);
+        }
+    }
+
     private static void TryDeleteOutputs(string path)
     {
         TryDelete(path);
-        foreach (var ext in new[] { ".mkv", ".mp4", ".ts", ".video.bin", ".audio.bin" })
+        foreach (var ext in new[] { ".mkv", ".mp4", ".ts", ".video.bin", ".audio.bin", ".srt", ".vtt" })
         {
             TryDelete(Path.ChangeExtension(path, ext));
         }

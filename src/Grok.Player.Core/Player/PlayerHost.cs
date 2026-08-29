@@ -1,6 +1,9 @@
 using Grok.Player.Core.Media;
 using Grok.Player.Core.Native;
 using Grok.Player.Core.Video;
+using Grok.Player.Core.Preview;
+using System.Globalization;
+using System.Text.Json;
 
 namespace Grok.Player.Core.Player;
 
@@ -9,6 +12,7 @@ public sealed class PlayerHost : IDisposable
     private readonly IMpvNative _mpv;
     private readonly PlayerHostOptions _options;
     private readonly object _gate = new();
+    private readonly object _cacheExportGate = new();
     private readonly SynchronizationContext? _sync;
     private Thread? _eventThread;
     private volatile bool _runEvents;
@@ -29,7 +33,12 @@ public sealed class PlayerHost : IDisposable
     private string? _subLang;
     private string? _extraAudio;
     private string? _pendingSubFile;
+    private bool _styledSubtitle;
+    private string _subtitleFont = "Segoe UI";
+    private double _subtitleFontSize = 55;
+    private int _subtitleShift;
     private int _langSelectLeft;
+    private int _mediaRevision;
 
     public PlayerHost(IMpvNative mpv, PlayerHostOptions? options = null, bool ownsNative = true)
     {
@@ -144,6 +153,7 @@ public sealed class PlayerHost : IDisposable
 
         lock (_gate)
         {
+            _mediaRevision++;
             LastError = null;
             MediaPath = trimmed;
             MediaTitle = !string.IsNullOrWhiteSpace(title)
@@ -645,6 +655,7 @@ public sealed class PlayerHost : IDisposable
     public bool SetSubtitleFile(string? path)
     {
         EnsureNotDisposed();
+        _styledSubtitle = path?.EndsWith(".ass", StringComparison.OrdinalIgnoreCase) == true;
         try
         {
             _mpv.SetPropertyString("sid", "no");
@@ -674,7 +685,10 @@ public sealed class PlayerHost : IDisposable
             SelectAddedSubtitle(path);
             if (path.EndsWith(".ass", StringComparison.OrdinalIgnoreCase))
             {
-                TrySetProperty("sub-ass-override", "scale");
+                // Override the base font/size with the control panel settings,
+                // while preserving inline color and emphasis tags.
+                TrySetProperty("sub-ass-override", "yes");
+                ApplyAssBaseStyle();
             }
 
             if (!_options.Headless)
@@ -727,13 +741,17 @@ public sealed class PlayerHost : IDisposable
     public void SetSubFont(string name)
     {
         EnsureNotDisposed();
-        _mpv.SetPropertyString("sub-font", string.IsNullOrWhiteSpace(name) ? "sans-serif" : name);
+        _subtitleFont = string.IsNullOrWhiteSpace(name) ? "Segoe UI" : name.Trim();
+        _mpv.SetPropertyString("sub-font", _subtitleFont);
+        ApplyAssBaseStyle();
     }
 
     public void SetSubFontSize(double size)
     {
         EnsureNotDisposed();
-        _mpv.SetPropertyDouble("sub-font-size", Math.Clamp(size, 8, 200));
+        _subtitleFontSize = Math.Clamp(size, 8, 200);
+        _mpv.SetPropertyDouble("sub-font-size", _subtitleFontSize);
+        ApplyAssBaseStyle();
     }
 
     public void SetSubPos(int pos)
@@ -745,11 +763,19 @@ public sealed class PlayerHost : IDisposable
     public void SetSubShiftX(int steps)
     {
         EnsureNotDisposed();
-        var clamped = Math.Clamp(steps, -20, 20);
-        var left = Math.Max(0, clamped * 24);
-        var right = Math.Max(0, -clamped * 24);
+        _subtitleShift = Math.Clamp(steps, -20, 20);
+        ApplyAssBaseStyle();
+    }
+
+    private void ApplyAssBaseStyle()
+    {
+        if (!_styledSubtitle) return;
+        var left = Math.Max(0, _subtitleShift * 24);
+        var right = Math.Max(0, -_subtitleShift * 24);
+        var safeFont = _subtitleFont.Replace(",", " ", StringComparison.Ordinal);
         _mpv.SetPropertyString("sub-ass-override", "yes");
-        _mpv.SetPropertyString("sub-ass-force-style", $"MarginL={left},MarginR={right}");
+        _mpv.SetPropertyString("sub-ass-force-style",
+            $"FontName={safeFont},FontSize={_subtitleFontSize:0.##},MarginL={left},MarginR={right}");
     }
 
     public void SetSpeed(double speed)
@@ -818,7 +844,7 @@ public sealed class PlayerHost : IDisposable
         _mpv.Command("screenshot-to-file", path, _options.Headless ? "video" : "window");
     }
 
-    public bool TryCaptureVideo(string path)
+    public bool TryCaptureVideo(string path, bool includeWindow = true)
     {
         if (string.IsNullOrWhiteSpace(path) || _disposed || !HasMedia || State == PlayerState.Opening)
         {
@@ -833,7 +859,7 @@ public sealed class PlayerHost : IDisposable
                 Directory.CreateDirectory(directory);
             }
 
-            var targets = _options.Headless ? new[] { "video" } : new[] { "window", "video" };
+            var targets = _options.Headless || !includeWindow ? new[] { "video" } : new[] { "window", "video" };
             foreach (var target in targets)
             {
                 try
@@ -855,6 +881,58 @@ public sealed class PlayerHost : IDisposable
         {
             return false;
         }
+    }
+
+    public CachedPreviewClip? ExportCachedPreviewClip(TimeSpan requested)
+    {
+        if (_disposed || !LiveWindow || State == PlayerState.Opening) return null;
+        var output = Path.Combine(Path.GetTempPath(), $"grok-live-cache-{Guid.NewGuid():N}.mkv");
+        lock (_cacheExportGate)
+        {
+            if (_disposed || !LiveWindow || State == PlayerState.Opening) return null;
+            var revision = _mediaRevision;
+            try
+            {
+                var json = _mpv.GetPropertyString("demuxer-cache-state");
+                if (string.IsNullOrWhiteSpace(json)) return null;
+                using var state = JsonDocument.Parse(json);
+                if (state.RootElement.TryGetProperty("total-bytes", out var bytes) &&
+                    bytes.GetInt64() > 64L * 1024 * 1024) return null;
+                if (!state.RootElement.TryGetProperty("seekable-ranges", out var ranges)) return null;
+                foreach (var item in ranges.EnumerateArray())
+                {
+                    var start = item.GetProperty("start").GetDouble();
+                    var end = item.GetProperty("end").GetDouble();
+                    if (requested.TotalSeconds < start || requested.TotalSeconds >= end) continue;
+                    _mpv.Command("dump-cache",
+                        start.ToString("R", CultureInfo.InvariantCulture),
+                        end.ToString("R", CultureInfo.InvariantCulture), output);
+                    if (_disposed || !LiveWindow || revision != _mediaRevision || !File.Exists(output) ||
+                        new FileInfo(output).Length < 4096) break;
+                    return new CachedPreviewClip(output, TimeSpan.FromSeconds(start), TimeSpan.FromSeconds(end));
+                }
+            }
+            catch (Exception) { }
+        }
+        try { File.Delete(output); } catch (IOException) { }
+        return null;
+    }
+
+    public double? PreviewLiveEdgeSeconds()
+    {
+        if (_disposed || !LiveWindow) return null;
+        try
+        {
+            var state = _mpv.GetPropertyString("demuxer-cache-state");
+            if (string.IsNullOrWhiteSpace(state)) return null;
+            using var json = System.Text.Json.JsonDocument.Parse(state);
+            return json.RootElement.TryGetProperty("cache-end", out var edge) &&
+                   double.IsFinite(edge.GetDouble())
+                ? edge.GetDouble()
+                : null;
+        }
+        catch (MpvException) { return null; }
+        catch (System.Text.Json.JsonException) { return null; }
     }
 
     public void SetFileLoop(bool enabled)
@@ -976,7 +1054,7 @@ public sealed class PlayerHost : IDisposable
             _mpv.SetOption("blend-subtitles", "yes");
             _mpv.SetOption("sub-use-margins", "yes");
             _mpv.SetOption("sub-font-size", "55");
-            _mpv.SetOption("sub-pos", "88");
+            _mpv.SetOption("sub-pos", PlaybackSpec.DefaultSubtitlePosition.ToString(System.Globalization.CultureInfo.InvariantCulture));
             _mpv.SetOption("sub-color", "#FFFFFFFF");
             _mpv.SetOption("sub-border-color", "#FF000000");
             _mpv.SetOption("sub-border-size", "2.5");
@@ -1148,6 +1226,7 @@ public sealed class PlayerHost : IDisposable
 
         lock (_gate)
         {
+            _mediaRevision++;
             Duration = duration;
             IsPaused = paused;
             if (!string.IsNullOrWhiteSpace(title) && !KeepsDisplayTitle(MediaTitle))
@@ -1192,6 +1271,7 @@ public sealed class PlayerHost : IDisposable
         SelectAttachedAudio();
         if (!string.IsNullOrWhiteSpace(_pendingSubFile))
         {
+            TrySetProperty("slang", "no");
             SetSubtitleFile(_pendingSubFile);
         }
 
@@ -1551,15 +1631,16 @@ public sealed class PlayerHost : IDisposable
         }
 
         TrySetProperty("cache-pause-initial", url ? "no" : "yes");
-        TrySetProperty("cache-pause", "yes");
-        TrySetProperty("cache-pause-wait", url ? "0.3" : "1");
-        TrySetProperty("demuxer-readahead-secs", url ? "12" : "20");
-        TrySetProperty("demuxer-max-bytes", url ? "96MiB" : "150MiB");
+        TrySetProperty("cache-pause", url ? "no" : "yes");
+        TrySetProperty("cache-pause-wait", url ? "2" : "1");
+        TrySetProperty("demuxer-readahead-secs", url ? "20" : "20");
+        TrySetProperty("demuxer-max-bytes", url ? "160MiB" : "150MiB");
         TrySetProperty("demuxer-max-back-bytes", url ? "64MiB" : "75MiB");
         TrySetProperty("demuxer-lavf-o", url ? "allowed_extensions=ALL" : "");
         TrySetProperty("prefetch-playlist", url ? "yes" : "no");
         TrySetProperty("hr-seek", "yes");
         TrySetProperty("hr-seek-framedrop", url ? "no" : "yes");
+        TrySetProperty("framedrop", "vo");
         TrySetProperty("video-sync", "audio");
         TrySetProperty("audio-buffer", url ? "0.4" : "0.2");
         TrySetProperty("sub-visibility", "yes");

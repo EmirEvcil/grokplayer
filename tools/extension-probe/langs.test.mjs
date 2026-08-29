@@ -55,6 +55,10 @@ assert.equal(api.audioCode(audioTracks[0]), "original");
 assert.equal(api.audioCode(audioTracks[8]), "hi");
 assert.equal(api.captionCode(captions[5]), "tr");
 assert.equal(api.captionCode(captions[6]), "en:asr");
+assert.equal(
+  api.captionUrlFor("en:asr", [{ code: "en:asr", url: "https://www.youtube.com/api/timedtext?v=x&lang=en&kind=asr" }]),
+  "https://www.youtube.com/api/timedtext?v=x&lang=en&kind=asr"
+);
 assert.equal(api.captionCode({ languageCode: "en", translationLanguage: { languageCode: "ru" } }), "ru");
 
 const turkish = api.resolve(
@@ -211,6 +215,191 @@ assert.equal(api.matchTrack("Off", turkish.available.captions), "off");
 
 const anyLang = api.applyPref("ja", "tr", turkish.available.captions);
 assert.equal(anyLang, "ja");
+
+const autoOnly = api.resolve(
+  {
+    getAudioTrack: audioTracks[0],
+    getAvailableAudioTracks: audioTracks,
+    captionTrack: {},
+    captionTracklist: [
+      {
+        languageCode: "en",
+        languageName: "English (auto-generated)",
+        kind: "asr",
+        baseUrl: "https://www.youtube.com/api/timedtext?v=auto1&lang=en&kind=asr"
+      }
+    ],
+    captionsOn: true
+  },
+  { audioPref: "auto", subPref: "auto" }
+);
+assert.equal(autoOnly.detected.sub, "en:asr");
+assert.equal(autoOnly.final.sub, "en:asr");
+assert.ok(String(autoOnly.captionUrl).includes("kind=asr"));
+
+const autoStillOff = api.resolve(
+  {
+    getAudioTrack: audioTracks[0],
+    getAvailableAudioTracks: audioTracks,
+    captionTrack: {},
+    captionTracklist: [
+      { languageCode: "en", languageName: "English (auto-generated)", kind: "asr" }
+    ],
+    captionsOn: false
+  },
+  { audioPref: "auto", subPref: "auto" }
+);
+assert.equal(autoStillOff.final.sub, "");
+
+assert.equal(api.captionCode({ vssId: "a.tr" }), "tr:asr");
+assert.equal(api.isAsrTrack({ vssId: "a.tr" }), true);
+assert.equal(api.isAsrTrack({ languageCode: "tr" }), false);
+
+const turkishAsrNoButton = api.resolve(
+  {
+    getAudioTrack: audioTracks[0],
+    getAvailableAudioTracks: audioTracks,
+    captionTrack: { languageCode: "tr", kind: "asr", vssId: "a.tr" },
+    captionTracklist: [
+      {
+        languageCode: "tr",
+        kind: "asr",
+        vssId: "a.tr",
+        baseUrl: "https://www.youtube.com/api/timedtext?v=TgLxTHRJbM4&lang=tr&kind=asr"
+      }
+    ]
+  },
+  { audioPref: "auto", subPref: "auto" }
+);
+assert.equal(turkishAsrNoButton.final.sub, "tr:asr");
+assert.ok(String(turkishAsrNoButton.captionUrl).includes("lang=tr"));
+
+const translatedEn = api.resolve(
+  {
+    getAudioTrack: audioTracks[0],
+    getAvailableAudioTracks: audioTracks,
+    captionTrack: {
+      languageCode: "tr",
+      kind: "asr",
+      translationLanguage: { languageCode: "en" }
+    },
+    captionTracklist: [
+      {
+        languageCode: "tr",
+        kind: "asr",
+        baseUrl: "https://www.youtube.com/api/timedtext?v=TgLxTHRJbM4&lang=tr&kind=asr"
+      }
+    ],
+    translationLanguages: [{ languageCode: "en", languageName: "English" }],
+    captionsOn: true
+  },
+  { audioPref: "auto", subPref: "auto" }
+);
+assert.equal(translatedEn.final.sub, "en");
+assert.ok(String(translatedEn.captionUrl).includes("tlang=en"), translatedEn.captionUrl);
+assert.ok(String(translatedEn.captionUrl).includes("lang=tr"), translatedEn.captionUrl);
+
+const translatedOverNativeAsr = api.resolve(
+  {
+    getAudioTrack: audioTracks[0],
+    getAvailableAudioTracks: audioTracks,
+    captionTrack: {
+      languageCode: "tr",
+      kind: "asr",
+      translationLanguage: { languageCode: "en" }
+    },
+    captionTracklist: [
+      {
+        languageCode: "tr",
+        kind: "asr",
+        baseUrl: "https://www.youtube.com/api/timedtext?v=fFxbSyTAmBs&lang=tr&kind=asr"
+      },
+      {
+        languageCode: "en",
+        kind: "asr",
+        baseUrl: "https://www.youtube.com/api/timedtext?v=fFxbSyTAmBs&lang=en&kind=asr"
+      }
+    ],
+    translationLanguages: [{ languageCode: "en", languageName: "English" }],
+    captionsOn: true
+  },
+  { audioPref: "auto", subPref: "auto" }
+);
+assert.equal(translatedOverNativeAsr.final.sub, "en");
+assert.ok(String(translatedOverNativeAsr.captionUrl).includes("tlang=en"), translatedOverNativeAsr.captionUrl);
+assert.ok(String(translatedOverNativeAsr.captionUrl).includes("lang=tr"), translatedOverNativeAsr.captionUrl);
+assert.ok(!/[?&]lang=en(?:&|$)/.test(String(translatedOverNativeAsr.captionUrl)), translatedOverNativeAsr.captionUrl);
+
+const authoredAndAsr = [
+  {
+    languageCode: "tr",
+    languageName: "Turkish",
+    baseUrl: "https://www.youtube.com/api/timedtext?v=Qtl8lJwbd4g&lang=tr&authored=1"
+  },
+  {
+    languageCode: "tr",
+    languageName: "Turkish (auto-generated)",
+    kind: "asr",
+    vssId: "a.tr",
+    baseUrl: "https://www.youtube.com/api/timedtext?v=Qtl8lJwbd4g&lang=tr&kind=asr"
+  }
+];
+const selectedAuthored = api.resolve(
+  {
+    captionTrack: authoredAndAsr[0],
+    captionTracklist: authoredAndAsr,
+    captionsOn: true
+  },
+  { audioPref: "auto", subPref: "auto" }
+);
+assert.equal(selectedAuthored.final.sub, "tr");
+assert.ok(String(selectedAuthored.captionUrl).includes("authored=1"), selectedAuthored.captionUrl);
+assert.ok(!String(selectedAuthored.captionUrl).includes("kind=asr"), selectedAuthored.captionUrl);
+
+const selectedAsr = api.resolve(
+  {
+    captionTrack: authoredAndAsr[1],
+    captionTracklist: authoredAndAsr,
+    captionsOn: true
+  },
+  { audioPref: "auto", subPref: "auto" }
+);
+assert.equal(selectedAsr.final.sub, "tr:asr");
+assert.ok(String(selectedAsr.captionUrl).includes("kind=asr"), selectedAsr.captionUrl);
+
+const authoredOverride = api.resolve(
+  {
+    captionTrack: authoredAndAsr[1],
+    captionTracklist: authoredAndAsr,
+    captionsOn: true
+  },
+  { audioPref: "auto", subPref: "tr" }
+);
+assert.equal(authoredOverride.final.sub, "tr");
+assert.ok(String(authoredOverride.captionUrl).includes("authored=1"), authoredOverride.captionUrl);
+
+const youtubeSplitAuthoredMetadata = api.resolve(
+  {
+    captionTrack: { languageCode: "tr", languageName: "Turkish" },
+    captionTracklist: [{ languageCode: "tr", languageName: "Turkish", isSelected: true }],
+    playerCaptionTracks: authoredAndAsr,
+    translationLanguages: [{ languageCode: "tr", languageName: "Turkish" }],
+    captionsOn: true
+  },
+  { audioPref: "auto", subPref: "auto" }
+);
+assert.equal(youtubeSplitAuthoredMetadata.final.sub, "tr");
+assert.ok(
+  String(youtubeSplitAuthoredMetadata.captionUrl).includes("authored=1"),
+  youtubeSplitAuthoredMetadata.captionUrl
+);
+assert.ok(!String(youtubeSplitAuthoredMetadata.captionUrl).includes("kind=asr"));
+
+const noAuthoredUrlMustNotBecomeSameLanguageAsr = api.captionUrlFor("tr", [
+  { code: "tr", name: "Turkish", url: "" },
+  { code: "tr:asr", name: "Turkish (auto-generated)", kind: "asr", url: "https://x.test/?lang=tr&kind=asr" }
+]);
+assert.equal(noAuthoredUrlMustNotBecomeSameLanguageAsr, "");
 
 const matrix = [
   ["auto", "auto", "bn", "ru", "bn", "ru"],

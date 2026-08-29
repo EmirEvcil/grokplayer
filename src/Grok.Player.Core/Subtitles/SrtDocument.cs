@@ -20,7 +20,9 @@ public sealed class SrtDocument
 
     public IList<SrtCue> Cues { get; }
 
-    public static SrtDocument Parse(string text)
+    public static SrtDocument Parse(string text) => Parse(text, compact: true);
+
+    public static SrtDocument Parse(string text, bool compact)
     {
         var cues = new List<SrtCue>();
         if (string.IsNullOrWhiteSpace(text))
@@ -42,11 +44,21 @@ public sealed class SrtDocument
             }
 
             var raw = string.Join('\n', body);
+            var styled = CaptionMarkup.HasStyle(CaptionMarkup.Parse(raw));
+            if (!styled && raw.Contains('\n', StringComparison.Ordinal) && KaraokeTime.IsMatch(raw))
+            {
+                raw = YouTubeTimedText.CurrentPhrase(raw);
+            }
+
             var spans = CaptionMarkup.Parse(raw);
             var block = spans.Count > 0 ? CaptionMarkup.Plain(spans) : CleanMarkup(raw);
             if (block.Length > 0)
             {
-                cues.Add(new SrtCue(cues.Count + 1, start, end, block, spans));
+                var cue = new SrtCue(cues.Count + 1, start, end, block, spans)
+                {
+                    Karaoke = styled ? [] : ParseKaraoke(raw, start)
+                };
+                cues.Add(cue);
             }
 
             body.Clear();
@@ -72,7 +84,11 @@ public sealed class SrtDocument
 
             if (line.Length == 0)
             {
-                Flush();
+                if (body.Exists(part => part.Trim().Length > 0))
+                {
+                    Flush();
+                }
+
                 continue;
             }
 
@@ -85,7 +101,174 @@ public sealed class SrtDocument
         }
 
         Flush();
-        return new SrtDocument(Compact(cues));
+        return new SrtDocument(compact ? Compact(cues) : cues);
+    }
+
+    public bool HasKaraoke => Cues.Any(cue => cue.HasKaraoke);
+
+    public SrtDocument Compacted() => new(Compact(Cues.ToList()));
+
+    public SrtDocument ForDisplay()
+    {
+        var cleaned = Deduped();
+        return cleaned.HasKaraoke ? new SrtDocument(DropFlash(cleaned.Cues.ToList())) : cleaned.Compacted();
+    }
+
+    public SrtDocument ForReadablePlayback()
+    {
+        var source = Cues.OrderBy(cue => cue.Start).ThenBy(cue => cue.Index)
+            .Select(cue => SemanticLines(cue)).ToList();
+        var ordered = source.Select(cue => cue.WithRange(cue.Start, cue.End)).ToList();
+        for (var i = 1; i < ordered.Count; i++)
+        {
+            var previous = source[i - 1];
+            var current = source[i];
+            var gap = current.Start - previous.End;
+            if (!current.HasKaraoke || !previous.HasKaraoke || gap > TimeSpan.FromMilliseconds(250))
+                continue;
+
+            // YouTube's ASR captions are consecutive rolling fragments. Keep
+            // the completed fragment on the first line while revealing the
+            // current fragment on the second, then roll again at the next cue.
+            var text = previous.Text.Trim() + "\n" + current.Text.TrimStart();
+            var rolling = new SrtCue(current.Index, current.Start, current.End, text,
+                [new CaptionSpan(previous.Text.Trim() + "\n", null), .. current.Spans])
+            {
+                Karaoke = [(current.Start, previous.Text.Trim() + "\n"), .. current.Karaoke]
+            };
+            ordered[i] = rolling;
+        }
+        for (var i = 0; i + 1 < ordered.Count; i++)
+        {
+            var current = ordered[i];
+            var next = ordered[i + 1];
+            if (current.End > next.Start)
+                current.End = next.Start;
+        }
+        return new SrtDocument(ordered.Where(cue => cue.End > cue.Start));
+    }
+
+    private static SrtCue SemanticLines(SrtCue cue)
+    {
+        var copy = cue.WithRange(cue.Start, cue.End);
+        if (cue.HasKaraoke || !SemanticGap.IsMatch(cue.Text))
+            return copy;
+
+        var broke = false;
+        copy.Text = SemanticGap.Replace(cue.Text, _ =>
+        {
+            if (broke) return " ";
+            broke = true;
+            return "\n";
+        });
+        broke = false;
+        copy.Spans = cue.Spans.Select(span => span with
+        {
+            Text = SemanticGap.Replace(span.Text, _ =>
+            {
+                if (broke) return " ";
+                broke = true;
+                return "\n";
+            })
+        }).ToList();
+        return copy;
+    }
+
+    public SrtDocument ExpandKaraoke()
+    {
+        var expanded = new List<SrtCue>();
+        foreach (var cue in Cues)
+        {
+            if (!cue.HasKaraoke)
+            {
+                expanded.Add(cue);
+                continue;
+            }
+
+            var words = cue.Karaoke;
+            var built = "";
+            for (var i = 0; i < words.Count; i++)
+            {
+                built += words[i].Text;
+                var from = words[i].At < cue.Start ? cue.Start : words[i].At;
+                var until = i + 1 < words.Count ? words[i + 1].At : cue.End;
+                if (until <= from)
+                {
+                    until = from + TimeSpan.FromMilliseconds(40);
+                }
+
+                if (until > cue.End)
+                {
+                    until = cue.End;
+                }
+
+                var text = built.TrimEnd();
+                if (text.Length == 0)
+                {
+                    continue;
+                }
+
+                expanded.Add(new SrtCue(0, from, until, text, CaptionMarkup.Parse(text)));
+            }
+        }
+
+        return new SrtDocument(expanded.Count > 0 ? expanded : Cues);
+    }
+
+    internal static IReadOnlyList<(TimeSpan At, string Text)> ParseKaraoke(string raw, TimeSpan cueStart)
+    {
+        var words = new List<(TimeSpan At, string Text)>();
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return words;
+        }
+
+        var last = 0;
+        var at = cueStart;
+        foreach (Match match in KaraokeTime.Matches(raw))
+        {
+            var piece = CleanFragment(raw[last..match.Index]);
+            if (piece.Length > 0)
+            {
+                words.Add((at, piece));
+            }
+
+            if (SrtTime.TryParse(match.Value.Trim('<', '>'), out var next))
+            {
+                at = next;
+            }
+
+            last = match.Index + match.Length;
+        }
+
+        var tail = CleanFragment(raw[last..]);
+        if (tail.Length > 0)
+        {
+            words.Add((at, tail));
+        }
+
+        return words;
+    }
+
+    private static string CleanFragment(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return "";
+        }
+
+        var cleaned = Tag.Replace(text, "");
+        cleaned = cleaned.Replace("\u200B", "", StringComparison.Ordinal)
+            .Replace("\u200C", "", StringComparison.Ordinal)
+            .Replace("\u200D", "", StringComparison.Ordinal)
+            .Replace("\uFEFF", "", StringComparison.Ordinal)
+            .Replace("\u00A0", " ", StringComparison.Ordinal);
+        cleaned = cleaned.Replace("&nbsp;", " ", StringComparison.OrdinalIgnoreCase)
+            .Replace("&amp;", "&", StringComparison.OrdinalIgnoreCase)
+            .Replace("&lt;", "<", StringComparison.OrdinalIgnoreCase)
+            .Replace("&gt;", ">", StringComparison.OrdinalIgnoreCase)
+            .Replace("&quot;", "\"", StringComparison.OrdinalIgnoreCase);
+        return Spaces.Replace(cleaned, " ");
     }
 
     public static string CleanMarkup(string text)
@@ -120,13 +303,14 @@ public sealed class SrtDocument
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex Spaces = new(@"[ \t]{2,}", RegexOptions.Compiled);
+    private static readonly Regex SemanticGap = new(@"[ \t]{2,}", RegexOptions.Compiled);
 
     public static SrtDocument Load(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         var bytes = File.ReadAllBytes(path);
         var text = Decode(bytes);
-        return Parse(text);
+        return Parse(text, compact: !path.EndsWith(".vtt", StringComparison.OrdinalIgnoreCase));
     }
 
     public void Save(string path)
@@ -169,7 +353,7 @@ public sealed class SrtDocument
 
     public bool HasStyle => Cues.Any(cue => CaptionMarkup.HasStyle(cue.Spans));
 
-    public string ToAss()
+    public string ToAss(bool revealWords = false)
     {
         var builder = new StringBuilder();
         builder.Append("[Script Info]\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n");
@@ -179,16 +363,66 @@ public sealed class SrtDocument
         builder.Append("[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n");
         foreach (var cue in Cues)
         {
-            builder.Append("Dialogue: 0,");
-            builder.Append(AssTime(cue.Start));
-            builder.Append(',');
-            builder.Append(AssTime(cue.End));
-            builder.Append(",Default,,0,0,0,,");
-            builder.Append(CaptionMarkup.ToAssText(cue.Spans));
-            builder.Append('\n');
+            if (IsRollingCue(cue))
+            {
+                // The completed lower line becomes the upper line while the next
+                // phrase appears underneath it. Splitting the two lines avoids
+                // moving the newly revealed words together with the old phrase.
+                AppendDialogue(builder, cue, 0,
+                    "{\\an2\\move(960,1032,960,968,0,150)}",
+                    CaptionMarkup.ToAssText([cue.Spans[0] with { Text = cue.Spans[0].Text.TrimEnd() }]));
+
+                var currentSpans = cue.Spans.Skip(1).ToArray();
+                var current = revealWords && cue.Karaoke.Count > 1 && !CaptionMarkup.HasStyle(currentSpans)
+                    ? KaraokeAss(cue.Karaoke.Skip(1), cue.Start)
+                    : CaptionMarkup.ToAssText(currentSpans);
+                AppendDialogue(builder, cue, 1, "{\\an2\\pos(960,1032)}", current);
+                continue;
+            }
+
+            var text = revealWords && cue.HasKaraoke && !CaptionMarkup.HasStyle(cue.Spans)
+                ? KaraokeAss(cue.Karaoke, cue.Start)
+                : CaptionMarkup.ToAssText(cue.Spans);
+            AppendDialogue(builder, cue, 0, "", text);
         }
 
         return builder.ToString();
+    }
+
+    private static bool IsRollingCue(SrtCue cue) =>
+        cue.HasKaraoke && cue.Karaoke.Count > 1 && cue.Spans.Count > 1 &&
+        cue.Karaoke[0].Text.EndsWith('\n') && cue.Spans[0].Text.EndsWith('\n');
+
+    private static string KaraokeAss(IEnumerable<(TimeSpan At, string Text)> words, TimeSpan cueStart)
+    {
+        var builder = new StringBuilder();
+        foreach (var word in words)
+        {
+            var at = Math.Max(0, (long)(word.At - cueStart).TotalMilliseconds);
+            builder.Append(at == 0 ? "{\\alpha&H00&}" :
+                $"{{\\alpha&HFF&\\t({at},{at + 1},\\alpha&H00&)}}");
+            builder.Append(CaptionMarkup.ToAssText([new CaptionSpan(word.Text, null)]));
+        }
+        return builder.ToString();
+    }
+
+    private static void AppendDialogue(
+        StringBuilder builder,
+        SrtCue cue,
+        int layer,
+        string animation,
+        string text)
+    {
+        builder.Append("Dialogue: ");
+        builder.Append(layer);
+        builder.Append(',');
+        builder.Append(AssTime(cue.Start));
+        builder.Append(',');
+        builder.Append(AssTime(cue.End));
+        builder.Append(",Default,,0,0,0,,");
+        builder.Append(animation);
+        builder.Append(text);
+        builder.Append('\n');
     }
 
     private static string AssTime(TimeSpan time)
@@ -291,27 +525,32 @@ public sealed class SrtDocument
         var keep = new List<SrtCue>();
         foreach (var cue in ordered)
         {
-            var replace = -1;
+            if (IsFlash(cue) &&
+                ordered.Any(other =>
+                    !ReferenceEquals(other, cue) &&
+                    !IsFlash(other) &&
+                    (string.Equals(other.Text, cue.Text, StringComparison.Ordinal) ||
+                     IsRollingUpdate(other.Text, cue.Text))))
+            {
+                continue;
+            }
+
             var skip = false;
             for (var i = 0; i < keep.Count; i++)
             {
                 var have = keep[i];
-                var sameLine = string.Equals(have.Text, cue.Text, StringComparison.Ordinal);
-                var rolling = Overlaps(have, cue) && IsRollingUpdate(have.Text, cue.Text);
+                var sameLine = Touches(have, cue) && string.Equals(have.Text, cue.Text, StringComparison.Ordinal);
+                var rolling = Touches(have, cue) && IsRollingUpdate(have.Text, cue.Text);
                 if (!sameLine && !rolling)
                 {
                     continue;
                 }
 
-                if (BetterCue(cue, have))
-                {
-                    replace = i;
-                }
-                else
-                {
-                    skip = true;
-                }
-
+                var start = have.Start < cue.Start ? have.Start : cue.Start;
+                var end = have.End > cue.End ? have.End : cue.End;
+                var winner = BetterCue(cue, have) ? cue : have;
+                keep[i] = winner.WithRange(start, end);
+                skip = true;
                 break;
             }
 
@@ -320,14 +559,7 @@ public sealed class SrtDocument
                 continue;
             }
 
-            if (replace >= 0)
-            {
-                keep[replace] = cue;
-            }
-            else
-            {
-                keep.Add(cue);
-            }
+            keep.Add(cue);
         }
 
         return keep.OrderBy(cue => cue.Start).ThenBy(cue => cue.End).ToList();
@@ -379,6 +611,56 @@ public sealed class SrtDocument
         }
 
         return builder.ToString();
+    }
+
+    public SrtDocument Deduped()
+    {
+        var keep = new List<SrtCue>();
+        foreach (var cue in Cues.OrderBy(item => item.Start).ThenBy(item => item.End))
+        {
+            var match = keep.FindIndex(have =>
+                have.Start == cue.Start &&
+                have.End == cue.End &&
+                string.Equals(have.Text, cue.Text, StringComparison.Ordinal));
+            if (match < 0)
+            {
+                keep.Add(cue);
+                continue;
+            }
+
+            if (CaptionMarkup.StyleScore(cue.Spans) > CaptionMarkup.StyleScore(keep[match].Spans) ||
+                cue.Karaoke.Count > keep[match].Karaoke.Count)
+            {
+                keep[match] = cue;
+            }
+        }
+
+        return new SrtDocument(keep);
+    }
+
+    internal static IReadOnlyList<SrtCue> DropFlash(IReadOnlyList<SrtCue> cues)
+    {
+        var list = cues.ToList();
+        return list.Where(cue =>
+            !IsFlash(cue) ||
+            !list.Any(other =>
+                !ReferenceEquals(other, cue) &&
+                !IsFlash(other) &&
+                (string.Equals(other.Text, cue.Text, StringComparison.Ordinal) ||
+                 IsRollingUpdate(other.Text, cue.Text)))).ToList();
+    }
+
+    private static bool IsFlash(SrtCue cue) => (cue.End - cue.Start).TotalMilliseconds < 50;
+
+    private static bool Touches(SrtCue left, SrtCue right)
+    {
+        if (Overlaps(left, right))
+        {
+            return true;
+        }
+
+        var gap = left.Start <= right.Start ? right.Start - left.End : left.Start - right.End;
+        return gap <= TimeSpan.FromMilliseconds(80);
     }
 
     private static bool Overlaps(SrtCue left, SrtCue right)

@@ -39,7 +39,7 @@
                     <Image
                         Width="16"
                         Height="16"
-                        Source="Assets/Logo.jpg"
+                        Source="Assets/Logo.png"
                         Stretch="Uniform" />
                     <TextBlock
                         VerticalAlignment="Center"

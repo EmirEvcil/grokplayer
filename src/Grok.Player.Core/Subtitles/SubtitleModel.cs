@@ -34,13 +34,20 @@ public sealed class SubtitleModel
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         var documentPath = StreamCaptionLoader.DocumentPath(path);
-        var document = SrtDocument.Load(documentPath);
+        var editedPath = EditPath(documentPath);
+        var hasEdits = editedPath != documentPath && File.Exists(editedPath);
+        var loaded = SrtDocument.Load(hasEdits ? editedPath : documentPath);
+        var document = loaded.ForDisplay();
         var media = Normalize(attachTo) ?? _media;
         var existing = IndexOfSame(documentPath, media);
         if (existing >= 0)
         {
             var track = _tracks[existing];
-            track.Document = document;
+            if (!track.IsEdited)
+            {
+                track.Document = document;
+                track.IsEdited = hasEdits;
+            }
             track.SourcePath = documentPath;
             track.PlayPath = PlayFileFor(track);
             track.AttachedMedia = media ?? track.AttachedMedia;
@@ -65,6 +72,7 @@ public sealed class SubtitleModel
             documentPath,
             document,
             media);
+        created.IsEdited = hasEdits;
         created.PlayPath = PlayFileFor(created);
         _tracks.Add(created);
         _activeIndex = _tracks.Count - 1;
@@ -99,6 +107,11 @@ public sealed class SubtitleModel
         }
 
         var sidecar = Path.ChangeExtension(media, ".srt");
+        if (!File.Exists(sidecar))
+        {
+            sidecar = Path.ChangeExtension(media, ".vtt");
+        }
+
         if (!File.Exists(sidecar) || HasSource(sidecar))
         {
             return;
@@ -218,7 +231,7 @@ public sealed class SubtitleModel
         var incoming = SrtDocument.Load(path);
         Active.Document = Active.Document.Merge(incoming);
         Active.IsMerged = true;
-        Active.PlayPath = WritePlayFile(Active);
+        Active.PlayPath = PlayFileFor(Active);
         if (_appliedIndex == _activeIndex)
         {
             Changed?.Invoke(SubtitleNotify.Track);
@@ -301,9 +314,11 @@ public sealed class SubtitleModel
         Changed?.Invoke(SubtitleNotify.Track);
     }
 
-    public void Disable()
+    public void Disable() => Disable(rememberOff: true);
+
+    public void Disable(bool rememberOff)
     {
-        if (_media is not null)
+        if (rememberOff && _media is not null)
         {
             _offForMedia.Add(_media);
             _choice.Remove(_media);
@@ -397,9 +412,10 @@ public sealed class SubtitleModel
             path = Active.PlayPath;
         }
 
-        Active.Document.Save(path);
-        Active.SourcePath = path;
-        Active.PlayPath = WritePlayFile(Active);
+        NormalizeEditedCues(Active.Document);
+        Active.Document.Save(EditPath(path));
+        Active.IsEdited = true;
+        Active.PlayPath = PlayFileFor(Active);
         Active.IsMerged = false;
         if (_appliedIndex == _activeIndex || BelongsTo(Active, _media))
         {
@@ -418,19 +434,21 @@ public sealed class SubtitleModel
             return;
         }
 
+        NormalizeEditedCues(Active.Document);
+        Active.IsEdited = true;
         if (!string.IsNullOrWhiteSpace(Active.SourcePath))
         {
             try
             {
-                Active.Document.Save(Active.SourcePath);
+                Active.Document.Save(EditPath(Active.SourcePath));
             }
             catch (Exception)
             {
             }
         }
 
-        Active.PlayPath = WritePlayFile(Active);
         Active.IsMerged = true;
+        Active.PlayPath = PlayFileFor(Active);
         if (_appliedIndex == _activeIndex || BelongsTo(Active, _media))
         {
             _appliedIndex = _activeIndex;
@@ -444,14 +462,15 @@ public sealed class SubtitleModel
 
     private void RememberChoice(SubtitleTrack track)
     {
-        if (_media is null)
+        var key = track.AttachedMedia ?? _media;
+        if (key is null)
         {
             return;
         }
 
-        track.AttachedMedia ??= _media;
-        _choice[_media] = track.Id;
-        _offForMedia.Remove(_media);
+        track.AttachedMedia ??= key;
+        _choice[key] = track.Id;
+        _offForMedia.Remove(key);
     }
 
     private bool HasSource(string path)
@@ -537,36 +556,97 @@ public sealed class SubtitleModel
             return null;
         }
 
+        if (path.Contains("youtube|", StringComparison.OrdinalIgnoreCase))
+        {
+            var at = path.IndexOf("youtube|", StringComparison.OrdinalIgnoreCase);
+            return "youtube|" + path[(at + "youtube|".Length)..].Trim();
+        }
+
         var value = MediaPlaylist.Normalize(path);
         return string.IsNullOrWhiteSpace(value) ? null : value;
     }
 
     private static string PlayFileFor(SubtitleTrack track)
     {
-        if (track.Document.HasStyle)
+        var prepared = track.Document.ForDisplay().ForReadablePlayback();
+        var styled = prepared.HasStyle || prepared.HasKaraoke;
+        if (!styled && !track.IsMerged && !track.IsEdited && CanUseSource(track.SourcePath, prepared))
         {
-            return WritePlayFile(track);
+            return track.SourcePath;
         }
 
-        var sibling = StreamCaptionLoader.PlayPath(track.SourcePath);
-        return string.IsNullOrWhiteSpace(sibling) ? track.SourcePath : sibling;
-    }
-
-    private static string WritePlayFile(SubtitleTrack track)
-    {
         var dir = Path.Combine(Path.GetTempPath(), "GrokPlayer", "subs");
         Directory.CreateDirectory(dir);
         var stamp = DateTime.UtcNow.Ticks.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        if (track.Document.HasStyle)
+        var path = Path.Combine(dir, track.Id + "-" + stamp + (styled ? ".ass" : ".srt"));
+        if (styled)
+            File.WriteAllText(path, prepared.ToAss(revealWords: true));
+        else
+            prepared.Save(path);
+        return path;
+    }
+
+    private static string EditPath(string source)
+    {
+        var full = Path.GetFullPath(source);
+        var cache = Path.GetFullPath(StreamCaptionLoader.CacheDirectory)
+            .TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        return source.EndsWith(".vtt", StringComparison.OrdinalIgnoreCase) ||
+               full.StartsWith(cache, StringComparison.OrdinalIgnoreCase)
+            ? source + ".edited.srt"
+            : source;
+    }
+
+    private static void NormalizeEditedCues(SrtDocument document)
+    {
+        foreach (var cue in document.Cues)
         {
-            var ass = Path.Combine(dir, track.Id + "-" + stamp + ".ass");
-            File.WriteAllText(ass, track.Document.ToAss());
-            return ass;
+            if (cue.HasKaraoke && (CaptionMarkup.HasStyle(cue.Spans) ||
+                !string.Equals(string.Concat(cue.Karaoke.Select(word => word.Text)).Trim(), cue.Text.Trim(), StringComparison.Ordinal)))
+            {
+                // Old word timings cannot overwrite freshly edited text or styles.
+                cue.Karaoke = [];
+            }
+        }
+    }
+
+    private static bool CanUseSource(string? sourcePath, SrtDocument play)
+    {
+        if (string.IsNullOrWhiteSpace(sourcePath) || !File.Exists(sourcePath))
+        {
+            return false;
         }
 
-        var path = Path.Combine(dir, track.Id + "-" + stamp + ".srt");
-        track.Document.Save(path);
-        return path;
+        if (sourcePath.EndsWith(".vtt", StringComparison.OrdinalIgnoreCase) ||
+            sourcePath.EndsWith(".ass", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        try
+        {
+            var source = SrtDocument.Load(sourcePath);
+            if (source.Cues.Count != play.Cues.Count)
+            {
+                return false;
+            }
+
+            for (var i = 0; i < source.Cues.Count; i++)
+            {
+                if (source.Cues[i].Start != play.Cues[i].Start ||
+                    source.Cues[i].End != play.Cues[i].End ||
+                    !string.Equals(source.Cues[i].Text, play.Cues[i].Text, StringComparison.Ordinal))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
     }
 }
 

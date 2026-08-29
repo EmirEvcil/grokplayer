@@ -309,6 +309,20 @@ public sealed class DownloadTests
         Assert.Equal("https://x/1080.m3u8", at1080.MediaUrl);
         var best = YouTubeCatalog.BindMaster(playable, master, 0);
         Assert.Equal("https://x/1440.m3u8", best.MediaUrl);
+        var muxedMaster =
+            """
+            #EXTM3U
+            #EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080,CODECS="avc1.640028,mp4a.40.2"
+            https://x/muxed.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=4000000,RESOLUTION=1920x1080,CODECS="avc1.640028",AUDIO="234"
+            https://x/video.m3u8
+            """;
+        var muxed = YouTubeCatalog.BindMaster(
+            new YouTubePlayable("abcdefghijk", "https://x/master.m3u8", "Clip", StreamKind.Vod),
+            muxedMaster,
+            1080);
+        Assert.Equal("https://x/muxed.m3u8", muxed.MediaUrl);
+        Assert.True(string.IsNullOrWhiteSpace(muxed.AudioUrl));
     }
 
     [Fact]
@@ -459,6 +473,56 @@ public sealed class DownloadTests
 
         Assert.Contains(handler.Requested, url => url.Contains("audio-tr.m3u8", StringComparison.OrdinalIgnoreCase));
         Directory.Delete(folder, true);
+    }
+
+    [Fact]
+    public void Parallel_jobs_use_the_selected_download_height()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "dl-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        using var manager = new DownloadManager(new DownloadSettings
+        {
+            Folder = folder,
+            MaxHeight = 360,
+            MaxParallel = 2
+        });
+        var first = manager.Enqueue("https://cdn.example/one.mp4", "One", start: false);
+        var second = manager.Enqueue("https://cdn.example/two.mp4", "Two", start: false, audioLang: "tr", maxHeight: 0);
+        Assert.Equal(360, first.MaxHeight);
+        Assert.Equal(360, second.MaxHeight);
+        Directory.Delete(folder, true);
+    }
+
+    [Fact]
+    public void Download_writes_a_sidecar_subtitle()
+    {
+        var source = Path.Combine(Path.GetTempPath(), "src-" + Guid.NewGuid().ToString("N") + ".bin");
+        var folder = Path.Combine(Path.GetTempPath(), "dl-" + Guid.NewGuid().ToString("N"));
+        var captions = Path.Combine(Path.GetTempPath(), "cap-" + Guid.NewGuid().ToString("N") + ".vtt");
+        Directory.CreateDirectory(folder);
+        File.WriteAllBytes(source, [1, 2, 3, 4, 5, 6, 7, 8]);
+        File.WriteAllText(captions, "WEBVTT\nLanguage: English\n\n00:00:00.000 --> 00:00:01.000\nHello there\n");
+        using var handler = new FileHandler(source);
+        using var manager = new DownloadManager(new DownloadSettings { Folder = folder, MaxParallel = 1 }, handler);
+        var job = manager.Enqueue(
+            "https://cdn.example/clip.mp4",
+            "ClipSubs",
+            start: true,
+            subLang: "en",
+            captionUrl: captions);
+        var until = DateTime.UtcNow.AddSeconds(4);
+        while (DateTime.UtcNow < until && job.State is DownloadState.Queued or DownloadState.Running)
+        {
+            Thread.Sleep(20);
+        }
+
+        Assert.Equal(DownloadState.Completed, job.State);
+        var sidecar = Path.ChangeExtension(job.OutputPath, ".srt");
+        Assert.True(File.Exists(sidecar), "missing " + sidecar);
+        Assert.Contains("Hello there", File.ReadAllText(sidecar), StringComparison.Ordinal);
+        Directory.Delete(folder, true);
+        File.Delete(source);
+        File.Delete(captions);
     }
 
     private sealed class HlsHandler : HttpMessageHandler

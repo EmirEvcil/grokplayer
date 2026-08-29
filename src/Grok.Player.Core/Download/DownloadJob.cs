@@ -35,6 +35,8 @@ public sealed class DownloadJob
     public int Height { get; set; }
     public int MaxHeight { get; set; }
     public string? AudioLang { get; set; }
+    public string? SubLang { get; set; }
+    public string? CaptionUrl { get; set; }
 
     public double Progress
     {

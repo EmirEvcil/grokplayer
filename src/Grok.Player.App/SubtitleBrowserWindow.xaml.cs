@@ -521,6 +521,7 @@ public sealed partial class SubtitleBrowserWindow : Window
         {
             cue.Text = plain;
             cue.Spans = spans.Count > 0 ? spans : [new CaptionSpan(plain, null)];
+            cue.Karaoke = [];
             changed = true;
         }
 
@@ -641,17 +642,21 @@ public sealed partial class SubtitleBrowserWindow : Window
         }
 
         var owner = WindowNative.GetWindowHandle(this);
+        var editingRow = _selected;
+        var editingTrack = _view.Subtitles.Active;
         _styleWindow = new SubtitleStyleWindow(owner, _playerAlwaysOnTop || _stayAbove, _selected.Cue.Spans);
         _styleWindow.Applied += style =>
         {
-            if (_selected is null)
+            if (_view.Subtitles.Active != editingTrack)
             {
+                _log("Select the original subtitle track before applying this style");
                 return;
             }
 
-            var cue = _selected.Cue;
+            var cue = editingRow.Cue;
             cue.Spans = [style with { Text = cue.Text }];
-            _selected.RefreshText();
+            cue.Karaoke = [];
+            editingRow.RefreshText();
             FillEdit();
             _view.Subtitles.PersistActive();
             _log("Subtitle style updated");

@@ -7,6 +7,35 @@ namespace Grok.Player.Core.Tests;
 public sealed class SeekPreviewTests
 {
     [Fact]
+    public void Frozen_hls_window_selects_the_segment_relative_to_the_live_edge()
+    {
+        var playlist = """
+            #EXTM3U
+            #EXT-X-MEDIA-SEQUENCE:100
+            #EXT-X-MAP:URI="init.mp4"
+            #EXTINF:4,
+            1.m4s
+            #EXTINF:4,
+            2.m4s
+            #EXTINF:4,
+            3.m4s
+            #EXTINF:4,
+            4.m4s
+            #EXTINF:4,
+            5.m4s
+            """;
+        var window = HlsLivePreviewExtractor.BuildWindow(
+            new Uri("https://cdn.example/live/media.m3u8"), playlist, behindLiveSeconds: 5);
+        Assert.NotNull(window);
+        Assert.Equal(7, window.Value.SeekSeconds, precision: 3);
+        Assert.DoesNotContain("/1.m4s", window.Value.Manifest);
+        Assert.Contains("https://cdn.example/live/3.m4s", window.Value.Manifest);
+        Assert.Contains("https://cdn.example/live/5.m4s", window.Value.Manifest);
+        Assert.Contains("https://cdn.example/live/init.mp4", window.Value.Manifest);
+        Assert.Contains("#EXT-X-MEDIA-SEQUENCE:102", window.Value.Manifest);
+    }
+
+    [Fact]
     public void Hover_without_media_is_hidden()
     {
         using var controller = new SeekPreviewController(new RecordingRenderer());
@@ -102,6 +131,8 @@ public sealed class SeekPreviewTests
     {
         var renderer = new BlockingRenderer();
         using var scheduler = new SeekPreviewScheduler(renderer, bucketSeconds: 1);
+        var published = new System.Collections.Concurrent.ConcurrentQueue<TimeSpan>();
+        scheduler.FrameReady += (time, _) => published.Enqueue(time);
         scheduler.SetMedia("https://cdn.example/vod.m3u8", null, prefetch: false);
         scheduler.Request(TimeSpan.FromSeconds(10));
         Assert.True(renderer.FirstCaptureStarted.Wait(TimeSpan.FromSeconds(2)));
@@ -119,6 +150,7 @@ public sealed class SeekPreviewTests
                     Assert.Equal(TimeSpan.FromSeconds(10), renderer.Times[0]);
                     Assert.Equal(TimeSpan.FromSeconds(100), renderer.Times[1]);
                     Assert.Equal(TimeSpan.FromSeconds(98), renderer.Times[2]);
+                    Assert.Equal(TimeSpan.FromSeconds(100), Assert.Single(published));
                     return;
                 }
             }
@@ -127,6 +159,38 @@ public sealed class SeekPreviewTests
         }
 
         Assert.Fail("The prioritized hover neighborhood was not rendered in time.");
+    }
+
+    [Fact]
+    public void Exact_network_hover_does_not_queue_unrequested_neighbors()
+    {
+        var renderer = new RecordingRenderer();
+        using var scheduler = new SeekPreviewScheduler(renderer, bucketSeconds: 1);
+        var ready = new ManualResetEventSlim(false);
+        scheduler.FrameReady += (_, _) => ready.Set();
+        scheduler.SetMedia("https://cdn.example/live.m3u8", null, prefetch: false);
+        scheduler.RequestExact("https://cdn.example/live.m3u8", TimeSpan.FromSeconds(42));
+        Assert.True(ready.Wait(TimeSpan.FromSeconds(2)));
+        Thread.Sleep(100);
+        lock (renderer.Times)
+            Assert.Equal([TimeSpan.FromSeconds(42)], renderer.Times);
+    }
+
+    [Fact]
+    public void Live_exact_hover_uses_edge_distance_without_preparing_a_sliding_decoder()
+    {
+        var renderer = new LiveRenderer();
+        using var scheduler = new SeekPreviewScheduler(renderer, bucketSeconds: 1);
+        var ready = new ManualResetEventSlim(false);
+        scheduler.FrameReady += (_, _) => ready.Set();
+        scheduler.SetMedia("https://cdn.example/live.m3u8", null, prefetch: false);
+        scheduler.RequestLiveExact(
+            "https://cdn.example/live.m3u8",
+            TimeSpan.FromSeconds(42),
+            behindLiveSeconds: 120);
+        Assert.True(ready.Wait(TimeSpan.FromSeconds(2)));
+        Assert.Equal(120, renderer.BehindLiveSeconds);
+        Assert.Equal(0, renderer.PrepareCalls);
     }
 
     [Fact]
@@ -315,7 +379,6 @@ public sealed class SeekPreviewTests
         {
             scheduler.Remember(TimeSpan.FromSeconds(90), watched);
             scheduler.PrefetchRange(TimeSpan.FromSeconds(80), TimeSpan.FromSeconds(200));
-            Assert.True(ready.Wait(TimeSpan.FromSeconds(2)));
             var until = DateTime.UtcNow.AddSeconds(2);
             while (DateTime.UtcNow < until)
             {
@@ -339,6 +402,7 @@ public sealed class SeekPreviewTests
                     Assert.InRange(time.TotalSeconds, 80, 200);
                 });
             }
+            Assert.False(ready.IsSet); // Background neighbors must not replace a hovered frame.
         }
         finally
         {
@@ -463,5 +527,21 @@ public sealed class SeekPreviewTests
         {
             ReleaseFirstCapture.Set();
         }
+    }
+
+    private sealed class LiveRenderer : ISeekPreviewRenderer, ILiveSeekPreviewRenderer
+    {
+        public int PrepareCalls { get; private set; }
+        public double BehindLiveSeconds { get; private set; }
+
+        public void Prepare(string path) => PrepareCalls++;
+        public string? Capture(TimeSpan time) => null;
+        public string CaptureBehindLive(string path, double behindLiveSeconds, DateTime requestedUtc)
+        {
+            BehindLiveSeconds = behindLiveSeconds;
+            return "/tmp/live-preview.jpg";
+        }
+        public void Reset() { }
+        public void Dispose() { }
     }
 }

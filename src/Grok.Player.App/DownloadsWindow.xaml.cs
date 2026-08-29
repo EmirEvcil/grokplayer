@@ -20,6 +20,7 @@ public sealed partial class DownloadsWindow : Window
     private bool _stayAbove;
     private bool _playerAlwaysOnTop;
     private bool _dragging;
+    private int _dirty = 1;
     private Point32 _dragMouse;
     private PointInt32 _dragWindow;
 
@@ -54,13 +55,19 @@ public sealed partial class DownloadsWindow : Window
         WindowChrome.ApplyLook(hwnd, Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"));
         BindOwner(false);
 
-        _downloads.Changed += () => DispatcherQueue.TryEnqueue(Paint);
-        _clock.Tick += (_, _) => Paint();
+        _downloads.Changed += DownloadsChanged;
+        Closed += (_, _) => { _clock.Stop(); _downloads.Changed -= DownloadsChanged; };
+        _clock.Tick += (_, _) =>
+        {
+            if (Interlocked.Exchange(ref _dirty, 0) != 0) Paint();
+        };
         UpdatePinVisual();
         Paint();
     }
 
     private bool _fitted;
+
+    private void DownloadsChanged() => Interlocked.Exchange(ref _dirty, 1);
 
     private void FitOnce()
     {

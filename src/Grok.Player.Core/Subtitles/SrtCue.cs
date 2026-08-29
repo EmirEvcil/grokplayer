@@ -21,5 +21,12 @@ public sealed class SrtCue
 
     public IReadOnlyList<CaptionSpan> Spans { get; set; }
 
+    public IReadOnlyList<(TimeSpan At, string Text)> Karaoke { get; set; } = [];
+
+    public bool HasKaraoke => Karaoke.Count > 1;
+
     public long StartMs => (long)Math.Round(Start.TotalMilliseconds);
+
+    public SrtCue WithRange(TimeSpan start, TimeSpan end) =>
+        new(Index, start, end < start ? start : end, Text, Spans) { Karaoke = Karaoke };
 }

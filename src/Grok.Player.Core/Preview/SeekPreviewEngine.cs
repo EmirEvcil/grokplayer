@@ -3,7 +3,7 @@ using Grok.Player.Core.Native;
 
 namespace Grok.Player.Core.Preview;
 
-public sealed class SeekPreviewEngine : ISeekPreviewRenderer
+public sealed class SeekPreviewEngine : ISeekPreviewRenderer, IExactSeekPreviewRenderer, ILiveSeekPreviewRenderer
 {
     private readonly IMpvNative _mpv;
     private readonly bool _ownsNative;
@@ -22,6 +22,15 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer
 
     public static SeekPreviewEngine Create() => new(new MpvNative());
 
+    public TimeSpan Position
+    {
+        get
+        {
+            try { return TimeSpan.FromSeconds(Math.Max(0, _mpv.GetPropertyDouble("time-pos") ?? 0)); }
+            catch (MpvException) { return TimeSpan.Zero; }
+        }
+    }
+
     public void Prepare(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
@@ -33,20 +42,36 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer
         var youtube = LooksLikeYouTube(path);
         if (string.Equals(_path, path, StringComparison.OrdinalIgnoreCase) && !_ready)
         {
-            _ready = WaitForFile(youtube ? 10 : 1.6);
+            _ready = WaitForFile(youtube ? 3.5 : 1.6);
             return;
         }
 
         _path = path;
         _ready = false;
         ApplyNetworkIdentity(path);
+        var liveHls = path.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ||
+                      path.EndsWith(".m3u", StringComparison.OrdinalIgnoreCase);
+        if (liveHls)
+        {
+            TrySet("demuxer-lavf-o", "live_start_index=-1,allowed_extensions=ALL");
+            TrySet("demuxer-lavf-analyzeduration", "0.15");
+            TrySet("demuxer-lavf-probesize", "65536");
+            TrySet("hls-live-edge", "1");
+        }
         _mpv.Command("loadfile", path, "replace");
         _mpv.SetPropertyFlag("pause", true);
-        var wait = youtube ? 10 : path.Contains("://", StringComparison.Ordinal) ? 2.4 : 0.8;
+        var wait = youtube ? 3.5 : liveHls ? 8.0 : path.Contains("://", StringComparison.Ordinal) ? 2.4 : 0.8;
         _ready = WaitForFile(wait);
     }
 
-    public string? Capture(TimeSpan time)
+    public string? Capture(TimeSpan time) => Capture(time, exact: false);
+
+    public string? CaptureExact(TimeSpan time) => Capture(time, exact: true);
+
+    public string? CaptureBehindLive(string path, double behindLiveSeconds, DateTime requestedUtc) =>
+        HlsLivePreviewExtractor.Capture(path, behindLiveSeconds, requestedUtc);
+
+    public string? Capture(TimeSpan time, bool exact)
     {
         if (string.IsNullOrWhiteSpace(_path) || !_ready)
         {
@@ -55,14 +80,25 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer
 
         var seconds = Math.Max(0, time.TotalSeconds).ToString("0.###", CultureInfo.InvariantCulture);
         var network = _path.Contains("://", StringComparison.Ordinal);
-        if (!TrySeek(seconds, network ? "absolute+keyframes" : "absolute") &&
-            !TrySeek(seconds, "absolute"))
+        DrainPendingEvents();
+        if (exact
+            ? !TrySeek(seconds, "absolute+exact")
+            : !TrySeek(seconds, network ? "absolute+keyframes" : "absolute") &&
+              !TrySeek(seconds, "absolute"))
         {
             return null;
         }
 
-        WaitForSeek();
-        if (network && !SeekLanded(time))
+        if (network || exact)
+        {
+            if (!WaitForSeekLanding(time, exact ? 0.35 : 2.5, network ? 3.0 : 1.0))
+                return null;
+        }
+        else
+        {
+            WaitForSeek();
+        }
+        if ((network || exact) && !SeekLanded(time, exact ? 0.35 : 2.5))
         {
             return null;
         }
@@ -135,6 +171,7 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer
         _mpv.SetOption("hr-seek", "no");
         _mpv.SetOption("hr-seek-framedrop", "yes");
         _mpv.SetOption("vd-lavc-fast", "yes");
+        _mpv.SetOption("vd-lavc-threads", "1");
         _mpv.SetOption("vd-lavc-skiploopfilter", "nonkey");
         _mpv.SetOption("screenshot-sw", "yes");
         _mpv.SetOption("screenshot-format", "jpeg");
@@ -148,26 +185,55 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer
         _mpv.SetOption("demuxer-max-bytes", "8MiB");
         _mpv.SetOption("demuxer-lavf-o", "allowed_extensions=ALL");
         _mpv.SetOption("cache-pause-initial", "no");
-        _mpv.SetOption("hls-bitrate", "min");
+        // This decoder is the quality-upgrade tier after the tiny storyboard,
+        // so selecting the minimum HLS rendition would defeat its purpose.
+        _mpv.SetOption("hls-bitrate", "max");
         _mpv.SetOption("vf", "scale=512:-2");
     }
 
-    private bool SeekLanded(TimeSpan requested)
+    private bool SeekLanded(TimeSpan requested, double toleranceSeconds)
     {
         try
         {
             var actual = _mpv.GetPropertyDouble("time-pos");
-            if (actual is null)
-            {
-                return true;
-            }
+            if (actual is null) return false;
 
-            return Math.Abs(actual.Value - requested.TotalSeconds) <= 12;
+            return Math.Abs(actual.Value - requested.TotalSeconds) <= toleranceSeconds;
         }
         catch (MpvException)
         {
             return true;
         }
+    }
+
+    private bool WaitForSeekLanding(TimeSpan requested, double toleranceSeconds, double timeoutSeconds)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
+        var frameRestarted = false;
+        while (DateTime.UtcNow < deadline)
+        {
+            var ev = _mpv.WaitEvent(0.02);
+            if (ev.Id is MpvEventId.PlaybackRestart or MpvEventId.VideoReconfig)
+            {
+                frameRestarted = true;
+            }
+
+            // time-pos can update before the decoder replaces its previous
+            // video frame. Waiting for PlaybackRestart prevents a screenshot
+            // from carrying an older hover image under the new timestamp.
+            if (frameRestarted && SeekLanded(requested, toleranceSeconds))
+            {
+                Settle(0.03);
+                return SeekLanded(requested, toleranceSeconds);
+            }
+        }
+        return false;
+    }
+
+    private void DrainPendingEvents()
+    {
+        for (var i = 0; i < 64; i++)
+            if (_mpv.WaitEvent(0).Id == MpvEventId.None) break;
     }
 
     private bool TrySeek(string seconds, string mode)

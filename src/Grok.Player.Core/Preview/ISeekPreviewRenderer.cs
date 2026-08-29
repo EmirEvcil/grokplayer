@@ -6,3 +6,13 @@ public interface ISeekPreviewRenderer : IDisposable
     string? Capture(TimeSpan time);
     void Reset();
 }
+
+public interface IExactSeekPreviewRenderer
+{
+    string? CaptureExact(TimeSpan time);
+}
+
+public interface ILiveSeekPreviewRenderer
+{
+    string? CaptureBehindLive(string path, double behindLiveSeconds, DateTime requestedUtc);
+}

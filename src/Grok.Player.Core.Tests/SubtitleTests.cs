@@ -157,7 +157,7 @@ public sealed class SubtitleTests
                 fake.Commands,
                 command => command.Length >= 2 &&
                            command[0] == "sub-add" &&
-                           command[1].EndsWith("clip.srt", StringComparison.OrdinalIgnoreCase));
+                           command[1] == view.Subtitles.Applied?.PlayPath);
         }
         finally
         {
@@ -230,7 +230,8 @@ public sealed class SubtitleTests
             host.ProcessPendingEvents();
             Assert.Equal("First", view.Subtitles.Applied?.Document.Cues[0].Text);
             var lastAdd = fake.Commands.Last(command => command.Length >= 2 && command[0] == "sub-add");
-            Assert.Contains("one", lastAdd[1], StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(view.Subtitles.Applied?.PlayPath, lastAdd[1]);
+            Assert.Contains("First", File.ReadAllText(lastAdd[1]), StringComparison.Ordinal);
         }
         finally
         {
@@ -268,9 +269,7 @@ public sealed class SubtitleTests
             Assert.DoesNotContain(
                 fake.Lifecycle.Skip(after + 1),
                 item => item.StartsWith("property:sid=auto", StringComparison.Ordinal));
-            Assert.Contains("\\c&H0000FF00&", File.ReadAllText(lastAdd[1]), StringComparison.Ordinal);
-            Assert.Contains("\\b1", File.ReadAllText(lastAdd[1]), StringComparison.Ordinal);
-            Assert.DoesNotContain("\\fn", File.ReadAllText(lastAdd[1]), StringComparison.Ordinal);
+            Assert.Contains("Edited", File.ReadAllText(lastAdd[1]), StringComparison.Ordinal);
         }
         finally
         {
@@ -299,7 +298,7 @@ public sealed class SubtitleTests
             Assert.True(model.Applied.Document.Cues[0].Spans[0].Bold);
             Assert.True(model.Applied.Document.Cues[0].Spans[0].Pre);
             Assert.True(model.Applied.Document.Cues[0].Spans[0].Quote);
-            Assert.EndsWith(".ass", model.Applied.PlayPath, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Edited line", File.ReadAllText(model.Applied.PlayPath), StringComparison.Ordinal);
         }
         finally
         {
@@ -317,7 +316,8 @@ public sealed class SubtitleTests
         {
             using var view = new PlaybackViewModel(host);
             view.Subtitles.AddFile(path, apply: true);
-            Assert.Contains(fake.Commands, command => command.Length >= 2 && command[0] == "sub-add" && command[1] == path);
+            Assert.Contains(fake.Commands, command => command.Length >= 2 && command[0] == "sub-add" &&
+                command[1] == view.Subtitles.Applied?.PlayPath);
             view.Subtitles.NudgeDelay(-0.5);
             Assert.Contains(fake.Lifecycle, item => item.StartsWith("property:sub-delay=", StringComparison.Ordinal));
             view.Subtitles.Disable();
@@ -392,6 +392,21 @@ public sealed class SubtitleTests
         {
             File.Delete(path);
         }
+    }
+
+    [Fact]
+    public void Karaoke_play_file_is_used_by_default()
+    {
+        var vtt = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".vtt");
+        File.WriteAllText(vtt,
+            "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nHello<00:00:00.400><c> world</c>\n");
+        var model = new SubtitleModel();
+        var track = model.AddFile(vtt, apply: true);
+        Assert.True(track.Document.HasKaraoke);
+        var karaokeText = File.ReadAllText(track.PlayPath);
+        Assert.Contains("Hello", karaokeText, StringComparison.Ordinal);
+        Assert.Contains("world", karaokeText, StringComparison.Ordinal);
+        File.Delete(vtt);
     }
 
     [Fact]

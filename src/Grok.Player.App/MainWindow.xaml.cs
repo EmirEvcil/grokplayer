@@ -83,10 +83,14 @@ public sealed partial class MainWindow : Window
     private DownloadsWindow? _downloads;
     private DispatcherTimer? _cursorHideTimer;
     private DispatcherTimer? _livePreviewHarvest;
+    private readonly LivePreviewBuffer _livePreviews = new();
+    private readonly LiveCachePreviewProvider _liveCachePreviews;
+    private readonly LivePreviewCoverageProvider _liveCoveragePreviews;
 
     private string? _openedPreviewPath;
     private bool _cursorHidden;
     private bool _tornDown;
+    private bool _closing;
     private readonly InstanceLaunchArgs _launchArgs =
         InstanceLaunchArgs.Parse(Environment.GetCommandLineArgs().Skip(1));
     private bool _launchApplied;
@@ -119,6 +123,10 @@ public sealed partial class MainWindow : Window
         WindowChrome.Apply(parent, Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico"), 840, 520);
         _surface = new NativeVideoSurface(parent);
         _player = PlayerHost.CreateForInterface(_surface.Handle);
+        _liveCachePreviews = new LiveCachePreviewProvider(_player.ExportCachedPreviewClip, _livePreviews);
+        _liveCachePreviews.FrameReady += OnLiveCachePreviewReady;
+        _liveCoveragePreviews = new LivePreviewCoverageProvider(_livePreviews);
+        _liveCoveragePreviews.CoverageReady += OnLiveCoverageReady;
         _view = new PlaybackViewModel(
             _player,
             network: new NetworkMonitor(),
@@ -469,7 +477,7 @@ public sealed partial class MainWindow : Window
         DispatcherQueue.TryEnqueue(() =>
             ShowActionFeedback(_videoFullscreen ? "Fullscreen" : "Windowed"));
     }
-    private void CloseButton_Click(object sender, RoutedEventArgs e) => Close();
+    private void CloseButton_Click(object sender, RoutedEventArgs e) => RequestClose();
 
     private void SetAlwaysOnTop(bool value)
     {
@@ -625,10 +633,10 @@ public sealed partial class MainWindow : Window
         StreamTabButton.Foreground = stream ? accent : muted;
         LocalTabChrome.Background = stream ? chrome : panel;
         StreamTabChrome.Background = stream ? panel : chrome;
-        LocalTabChrome.BorderThickness = new Thickness(0, 0, 1, stream ? 0 : 2);
-        StreamTabChrome.BorderThickness = new Thickness(0, 0, 0, stream ? 2 : 0);
-        LocalTabChrome.BorderBrush = stream ? line : accent;
-        StreamTabChrome.BorderBrush = stream ? accent : line;
+        LocalTabChrome.BorderThickness = new Thickness(0, 0, 1, 0);
+        StreamTabChrome.BorderThickness = new Thickness(0);
+        LocalTabChrome.BorderBrush = line;
+        StreamTabChrome.BorderBrush = line;
     }
 
     private void ApplyLiveChrome()
@@ -1647,8 +1655,10 @@ public sealed partial class MainWindow : Window
             item.Path,
             item.Title,
             start: true,
-            _view.PreferredAudioLang,
-            item.VideoHeight > 0 ? item.VideoHeight : _view.PreferredVideoHeight);
+            item.AudioLang ?? _view.PreferredAudioLang,
+            0,
+            item.SkipCaptions ? "off" : item.SubLang ?? _view.PreferredSubLang,
+            item.CaptionUrl);
         ShowDownloads();
         ShowActionFeedback("Downloading " + item.Title);
     }
@@ -1662,8 +1672,10 @@ public sealed partial class MainWindow : Window
                 item.Path,
                 item.Title,
                 start: false,
-                _view.PreferredAudioLang,
-                item.VideoHeight);
+                item.AudioLang ?? _view.PreferredAudioLang,
+                0,
+                item.SkipCaptions ? "off" : item.SubLang ?? _view.PreferredSubLang,
+                item.CaptionUrl);
             count++;
         }
 
@@ -1800,6 +1812,7 @@ public sealed partial class MainWindow : Window
 
         AppWindow.Show();
         Activate();
+        if (payload == "--activate") return;
         if (ExternalOpen.TryParse(payload, out var open))
         {
             _view.ShowStreamTab(true);
@@ -2597,17 +2610,66 @@ public sealed partial class MainWindow : Window
         }
 
         _loadSpinArmed = true;
+        var board = new Storyboard();
         var spin = new DoubleAnimation
         {
             From = 0,
             To = 360,
-            Duration = new Duration(TimeSpan.FromSeconds(1.1)),
+            Duration = new Duration(TimeSpan.FromSeconds(1.15)),
             RepeatBehavior = RepeatBehavior.Forever
         };
         Storyboard.SetTarget(spin, LoadSpin);
         Storyboard.SetTargetProperty(spin, "Angle");
-        var board = new Storyboard();
         board.Children.Add(spin);
+
+        var inner = new DoubleAnimation
+        {
+            From = 360,
+            To = 0,
+            Duration = new Duration(TimeSpan.FromSeconds(1.7)),
+            RepeatBehavior = RepeatBehavior.Forever
+        };
+        Storyboard.SetTarget(inner, LoadSpinInner);
+        Storyboard.SetTargetProperty(inner, "Angle");
+        board.Children.Add(inner);
+
+        var pulse = new DoubleAnimation
+        {
+            From = 0.96,
+            To = 1.06,
+            Duration = new Duration(TimeSpan.FromSeconds(0.9)),
+            AutoReverse = true,
+            RepeatBehavior = RepeatBehavior.Forever,
+            EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
+        };
+        Storyboard.SetTarget(pulse, LoadPulse);
+        Storyboard.SetTargetProperty(pulse, "ScaleX");
+        board.Children.Add(pulse);
+        var pulseY = new DoubleAnimation
+        {
+            From = 0.96,
+            To = 1.06,
+            Duration = new Duration(TimeSpan.FromSeconds(0.9)),
+            AutoReverse = true,
+            RepeatBehavior = RepeatBehavior.Forever,
+            EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
+        };
+        Storyboard.SetTarget(pulseY, LoadPulse);
+        Storyboard.SetTargetProperty(pulseY, "ScaleY");
+        board.Children.Add(pulseY);
+
+        var glow = new DoubleAnimation
+        {
+            From = 0.45,
+            To = 1,
+            Duration = new Duration(TimeSpan.FromSeconds(0.9)),
+            AutoReverse = true,
+            RepeatBehavior = RepeatBehavior.Forever,
+            EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
+        };
+        Storyboard.SetTarget(glow, LoadCore);
+        Storyboard.SetTargetProperty(glow, "Opacity");
+        board.Children.Add(glow);
         board.Begin();
     }
 
@@ -2623,7 +2685,7 @@ public sealed partial class MainWindow : Window
             var engine = SeekPreviewEngine.Create();
             _previewUi = new SeekPreviewController(new NoopRenderer());
             _previewWork = new SeekPreviewScheduler(engine);
-            _previewWork.FrameReady += (_, _) =>
+            _previewWork.FrameReady += (time, path) =>
             {
                 var generation = _previewGeneration;
                 DispatcherQueue.TryEnqueue(() =>
@@ -2634,11 +2696,24 @@ public sealed partial class MainWindow : Window
                     }
 
                     var ready = MapPreviewTime(_previewUi.Current);
-                    var cached = _previewWork.GetCached(ready.Time, PreviewMaxDelta());
+                    // FrameReady is posted from the worker to the UI queue. The
+                    // pointer may move before this callback runs, so never apply
+                    // a previous VOD hover's image merely because it is in the
+                    // same storyboard interval. A fresh request will publish the
+                    // cached storyboard cell for the new exact hover target.
+                    var allowedDelta = _view.IsLive ? 1.5 : 0.15;
+                    if (Math.Abs((time - ready.Time).TotalSeconds) > allowedDelta)
+                    {
+                        return;
+                    }
+
+                    var cached = LivePlayback.IsUsableStill(path)
+                        ? path
+                        : _previewWork.GetCached(ready.Time, PreviewMaxDelta());
                     if (cached is not null)
                     {
                         _previewUi.RememberImage(cached);
-                        ready = MapPreviewTime(_previewUi.Current);
+                        ready = ready with { ImagePath = cached };
                     }
 
                     ShowFlyout(ready);
@@ -2721,6 +2796,9 @@ public sealed partial class MainWindow : Window
     private void ResetPreview(string? path)
     {
         _previewGeneration++;
+        _liveCachePreviews.Reset();
+        _liveCoveragePreviews.Reset();
+        _livePreviews.Reset();
         _previewMediaKey = PreviewMediaKey();
         _previewAtlas?.Dispose();
         _previewAtlas = null;
@@ -2761,8 +2839,8 @@ public sealed partial class MainWindow : Window
 
                 try
                 {
-                    atlas.PrefetchCoverage();
                     atlas.Prefetch(position);
+                    atlas.PrefetchCoverage();
                 }
                 catch (Exception)
                 {
@@ -2773,8 +2851,12 @@ public sealed partial class MainWindow : Window
 
     private void PrefetchLiveWindow()
     {
-        // Live thumbs come from the playing decoder. A second HLS seek
-        // produces black/sliced frames and a relative clock.
+        if (!_view.IsLive || string.IsNullOrWhiteSpace(_player.MediaPath) ||
+            _player.PreviewLiveEdgeSeconds() is not { } liveEdge) return;
+        _liveCoveragePreviews.Start(
+            _player.MediaPath,
+            liveEdge,
+            LivePlayback.DvrKeepSeconds + 4);
     }
 
     private void ShowLiveAwarePreview(SeekPreviewState state)
@@ -2793,7 +2875,12 @@ public sealed partial class MainWindow : Window
         }
 
         var media = _player.MediaPath ?? "";
-        var cached = _previewWork?.GetCached(state.Time, PreviewMaxDelta());
+        var decodedLive = _view.IsLive
+            ? _previewWork?.GetCached(state.Time, maxDeltaSeconds: 2)
+            : null;
+        var cached = _view.IsLive
+            ? decodedLive ?? _livePreviews.GetFrame(state.Time)
+            : _previewWork?.GetCached(state.Time, PreviewMaxDelta());
         if (cached is not null)
         {
             _previewUi?.RememberImage(cached);
@@ -2802,16 +2889,53 @@ public sealed partial class MainWindow : Window
         else
         {
             // Never display an unrelated old frame for a new hover target.
-            // PreviewFlyout renders a stable loading card until this point is ready.
+            // VOD can retain its fast tier while loading; live shows just the
+            // timestamp when this part of the DVR history has not been captured.
             state = state with { ImagePath = null };
         }
 
-        if (!_view.IsLive)
+        if (_view.IsLive)
+        {
+            // A background coverage frame is intentionally cheap and blurry.
+            // Keep it visible immediately, but always upgrade the hovered point
+            // into the high rendition unless that decoded frame is already cached.
+            if (cached is null) _liveCachePreviews.Request(state.Time);
+            if (decodedLive is null && _player.PreviewLiveEdgeSeconds() is { } liveEdge)
+            {
+                _previewWork?.RequestLiveExact(
+                    media,
+                    state.Time,
+                    Math.Max(0, liveEdge - state.Time.TotalSeconds));
+            }
+        }
+        else
         {
             _previewWork?.Request(media, state.Time);
         }
 
         ShowFlyout(state);
+    }
+
+    private void OnLiveCachePreviewReady(object? sender, TimeSpan time)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_closing || !_view.IsLive || _previewUi?.Current is not { IsVisible: true } current) return;
+            var state = MapPreviewTime(_previewUi.Move(
+                current.NormalizedPosition * SeekSlider.ActualWidth, SeekSlider.ActualWidth));
+            if (Math.Abs((state.Time - time).TotalSeconds) <= 2) ShowLiveAwarePreview(state);
+        });
+    }
+
+    private void OnLiveCoverageReady(object? sender, EventArgs e)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_closing || !_view.IsLive || _previewUi?.Current is not { IsVisible: true } current) return;
+            var state = MapPreviewTime(_previewUi.Move(
+                current.NormalizedPosition * SeekSlider.ActualWidth, SeekSlider.ActualWidth));
+            ShowLiveAwarePreview(state);
+        });
     }
 
     private double PreviewMaxDelta()
@@ -2841,15 +2965,14 @@ public sealed partial class MainWindow : Window
 
     private void ArmLivePreviewHarvest()
     {
-        if (_view.IsPlaying && !_view.IsSeeking && _player.HasMedia)
+        if (_view.IsLive && _view.IsPlaying && !_view.IsSeeking && !_view.IsLoading && _player.HasMedia)
         {
             if (_livePreviewHarvest is null)
             {
-                _livePreviewHarvest = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(_view.IsLive ? 500 : 2000) };
+                _livePreviewHarvest = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
                 _livePreviewHarvest.Tick += (_, _) => HarvestLivePreview();
             }
 
-            _livePreviewHarvest.Interval = TimeSpan.FromMilliseconds(_view.IsLive ? 500 : 2000);
             if (!_livePreviewHarvest.IsEnabled)
             {
                 _livePreviewHarvest.Start();
@@ -2861,55 +2984,29 @@ public sealed partial class MainWindow : Window
         _livePreviewHarvest?.Stop();
     }
 
-    private void HarvestLivePreview()
+    private async void HarvestLivePreview()
     {
-        if (!_view.IsPlaying || _view.IsSeeking)
+        if (_closing || _tornDown || !_view.IsLive || !_view.IsPlaying || _view.IsSeeking || _view.IsLoading)
         {
             return;
         }
 
         EnsurePreview();
-        var file = Path.Combine(Path.GetTempPath(), $"grok-live-{Guid.NewGuid():N}.jpg");
-        if (!_player.TryCaptureVideo(file) && !_surface.TryCaptureStill(file))
+        if (PreviewWindow() is not { } window) return;
+        BindPreviewMedia(window);
+        var generation = _previewGeneration;
+        var captured = await _livePreviews.CaptureAsync(
+            file => _player.TryCaptureVideo(file, includeWindow: false), () => _player.Position);
+        if (!captured || _closing || _tornDown || generation != _previewGeneration || !_view.IsLive) return;
+
+        // Update a stationary hover as soon as the playing decoder supplies a
+        // nearby frame. No pointer movement or second HLS decoder is required.
+        if (_previewUi?.Current is { IsVisible: true } current && PreviewWindow() is { } updatedWindow)
         {
-            try
-            {
-                File.Delete(file);
-            }
-            catch (IOException)
-            {
-            }
-
-            return;
+            BindPreviewMedia(updatedWindow);
+            var state = _previewUi.Move(current.NormalizedPosition * SeekSlider.ActualWidth, SeekSlider.ActualWidth);
+            ShowLiveAwarePreview(MapPreviewTime(state));
         }
-
-        if (!LivePlayback.IsUsableStill(file))
-        {
-            try
-            {
-                File.Delete(file);
-            }
-            catch (IOException)
-            {
-            }
-
-            return;
-        }
-
-        if (!string.Equals(_previewMediaKey, PreviewMediaKey(), StringComparison.Ordinal))
-        {
-            try
-            {
-                File.Delete(file);
-            }
-            catch (IOException)
-            {
-            }
-
-            return;
-        }
-
-        _previewWork?.Remember(_player.Position, file);
     }
 
     private void ShowFlyout(SeekPreviewState state)
@@ -2927,8 +3024,8 @@ public sealed partial class MainWindow : Window
         var hoverY = slider.Y;
         var image = LivePlayback.IsUsableStill(state.ImagePath) ? state.ImagePath : null;
         var timeText = PreviewClock.Text(_view.IsLive, state.Time);
-        const int dipW = 268;
-        const int dipH = 176;
+        const int dipW = PreviewFlyout.DipWidth;
+        const int dipH = PreviewFlyout.DipHeight;
         var point = new Point32((int)Math.Round(hoverX * scale), (int)Math.Round(hoverY * scale));
         ClientToScreen(hwnd, ref point);
         var pixelW = Math.Max(1, (int)Math.Round(dipW * scale));
@@ -3111,7 +3208,52 @@ public sealed partial class MainWindow : Window
         return null;
     }
 
-    private void OnWindowClosing(AppWindow sender, AppWindowClosingEventArgs args) => TeardownPlayer();
+    private void OnWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+    {
+        if (_tornDown)
+        {
+            return;
+        }
+
+        args.Cancel = true;
+        RequestClose();
+    }
+
+    private void RequestClose()
+    {
+        if (_closing)
+        {
+            return;
+        }
+
+        _closing = true;
+        try { _cursorHideTimer?.Stop(); } catch (Exception) { }
+        try { _livePreviewHarvest?.Stop(); } catch (Exception) { }
+        try { HideSeekPreview(); } catch (Exception) { }
+        try { _actionOsd.Dispose(); } catch (Exception) { }
+        try { _flyout.Dispose(); } catch (Exception) { }
+        try { _player.DetachSurface(); } catch (Exception) { }
+        try { _surface.Hide(); } catch (Exception) { }
+        try { AppWindow.Hide(); } catch (Exception) { }
+
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            try
+            {
+                TeardownPlayer();
+            }
+            catch (Exception)
+            {
+            }
+
+            Environment.Exit(0);
+        });
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            Thread.Sleep(4000);
+            Environment.Exit(0);
+        });
+    }
 
     private void OnClosed(object sender, WindowEventArgs args)
     {
@@ -3129,7 +3271,10 @@ public sealed partial class MainWindow : Window
         CloseOwned(_subtitleBrowser, () => _subtitleBrowser = null);
         CloseOwned(_preferences, () => _preferences = null);
         CloseOwned(_downloads, () => _downloads = null);
-        TeardownPlayer();
+        if (!_closing)
+        {
+            TeardownPlayer();
+        }
     }
 
     private void TeardownPlayer()
@@ -3144,6 +3289,9 @@ public sealed partial class MainWindow : Window
         try { _livePreviewHarvest?.Stop(); } catch (Exception) { }
         try { HideSeekPreview(); } catch (Exception) { }
         try { _previewWork?.Dispose(); } catch (Exception) { }
+        try { _liveCachePreviews.Dispose(); } catch (Exception) { }
+        try { _liveCoveragePreviews.Dispose(); } catch (Exception) { }
+        try { _livePreviews.Dispose(); } catch (Exception) { }
         try { _previewAtlas?.Dispose(); } catch (Exception) { }
         try { _actionOsd.Dispose(); } catch (Exception) { }
         try { _flyout.Dispose(); } catch (Exception) { }

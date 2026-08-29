@@ -4,7 +4,7 @@ namespace Grok.Player.Core.Launch;
 
 public sealed class ExternalOpen
 {
-    public ExternalOpen(string url, string? title = null, StreamKind kind = StreamKind.Unknown, bool play = true, string? audioLang = null, string? subLang = null, int height = 0)
+    public ExternalOpen(string url, string? title = null, StreamKind kind = StreamKind.Unknown, bool play = true, string? audioLang = null, string? subLang = null, int height = 0, string? captionUrl = null)
     {
         Url = url;
         Title = title;
@@ -13,6 +13,7 @@ public sealed class ExternalOpen
         AudioLang = audioLang;
         SubLang = subLang;
         Height = height;
+        CaptionUrl = captionUrl;
     }
 
     public string Url { get; }
@@ -23,6 +24,8 @@ public sealed class ExternalOpen
     public string? SubLang { get; }
 
     public int Height { get; }
+
+    public string? CaptionUrl { get; }
 
     public static bool TryParse(string? raw, out ExternalOpen open)
     {
@@ -47,7 +50,7 @@ public sealed class ExternalOpen
         return false;
     }
 
-    public static string ToProtocol(string url, string? title = null, StreamKind kind = StreamKind.Unknown, string? audioLang = null, string? subLang = null, int height = 0)
+    public static string ToProtocol(string url, string? title = null, StreamKind kind = StreamKind.Unknown, string? audioLang = null, string? subLang = null, int height = 0, string? captionUrl = null)
     {
         var query = "url=" + Uri.EscapeDataString(url);
         if (!string.IsNullOrWhiteSpace(title))
@@ -73,6 +76,11 @@ public sealed class ExternalOpen
         if (height > 0)
         {
             query += "&height=" + height.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        if (!string.IsNullOrWhiteSpace(captionUrl))
+        {
+            query += "&caption=" + Uri.EscapeDataString(captionUrl);
         }
 
         return "grokplayer://open?" + query;
@@ -102,6 +110,7 @@ public sealed class ExternalOpen
         string? title = null;
         string? audioLang = null;
         string? subLang = null;
+        string? captionUrl = null;
         var kind = StreamKind.Unknown;
         var play = true;
         var height = 0;
@@ -132,13 +141,17 @@ public sealed class ExternalOpen
             {
                 audioLang = MediaLanguage.IsOriginal(value) ? MediaLanguage.Original : MediaLanguage.Normalize(value);
             }
-            else if (name is "sub" or "cc" or "caption")
+            else if (name is "sub" or "cc")
             {
                 subLang = MediaLanguage.IsOff(value)
                     ? "off"
                     : MediaLanguage.IsOriginal(value)
                         ? MediaLanguage.Original
                         : MediaLanguage.Normalize(value, keepKind: true);
+            }
+            else if (name is "caption" or "ccurl" or "vtt")
+            {
+                captionUrl = string.IsNullOrWhiteSpace(value) ? null : value.Trim();
             }
             else if (name is "height" or "quality" or "res")
             {
@@ -154,7 +167,7 @@ public sealed class ExternalOpen
             return false;
         }
 
-        open = new ExternalOpen(url, title, kind, play, audioLang, subLang, height);
+        open = new ExternalOpen(url, title, kind, play, audioLang, subLang, height, captionUrl);
         return true;
     }
 }
