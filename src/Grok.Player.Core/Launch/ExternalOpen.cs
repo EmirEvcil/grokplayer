@@ -15,7 +15,7 @@ public sealed class ExternalOpen
         Height = height;
         CaptionUrl = captionUrl;
         Referer = referer;
-        DurationSeconds = durationSeconds is > 0 and < 86400 ? durationSeconds : null;
+        DurationSeconds = durationSeconds is > 0 and < 604800 ? durationSeconds : null;
         Soundtrack = string.IsNullOrWhiteSpace(soundtrack) ? null : soundtrack.Trim();
     }
 
@@ -97,7 +97,7 @@ public sealed class ExternalOpen
             query += "&page=" + Uri.EscapeDataString(referer);
         }
 
-        if (durationSeconds is > 0 and < 86400)
+        if (durationSeconds is > 0 and < 604800)
         {
             query += "&duration=" + durationSeconds.Value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
         }
@@ -195,7 +195,7 @@ public sealed class ExternalOpen
             {
                 if (double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var seconds) &&
                     seconds > 0 &&
-                    seconds < 86400)
+                    seconds < 604800)
                 {
                     durationSeconds = seconds;
                 }

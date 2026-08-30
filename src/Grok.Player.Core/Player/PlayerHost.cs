@@ -142,7 +142,7 @@ public sealed class PlayerHost : IDisposable
 
     public void Open(string path) => Open(path, StreamKind.Unknown);
 
-    public void Open(string path, StreamKind kind, string? audioUrl = null, string? title = null, string? userAgent = null, string? audioLang = null, string? subLang = null, string? subFile = null, string? referer = null)
+    public void Open(string path, StreamKind kind, string? audioUrl = null, string? title = null, string? userAgent = null, string? audioLang = null, string? subLang = null, string? subFile = null, string? referer = null, string? formatHint = null, string? httpHeaders = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         EnsureNotDisposed();
@@ -185,7 +185,8 @@ public sealed class PlayerHost : IDisposable
             SetState_NoLock(PlayerState.Opening);
         }
 
-        ApplyOpenProfile(trimmed, kind, userAgent, referer);
+        ApplyOpenProfile(trimmed, kind, userAgent, referer, httpHeaders);
+        TrySetProperty("demuxer-lavf-format", string.IsNullOrWhiteSpace(formatHint) ? "" : formatHint.Trim());
         if (!string.IsNullOrWhiteSpace(_extraAudio))
         {
             TrySetProperty("audio-files", _extraAudio);
@@ -1651,23 +1652,21 @@ public sealed class PlayerHost : IDisposable
         }
     }
 
-    private void ApplyOpenProfile(string path, StreamKind kind, string? userAgent = null, string? referer = null)
+    private void ApplyOpenProfile(string path, StreamKind kind, string? userAgent = null, string? referer = null, string? httpHeaders = null)
     {
         var hlsFile = path.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ||
                       path.EndsWith(".m3u", StringComparison.OrdinalIgnoreCase) ||
                       path.Contains("master.txt", StringComparison.OrdinalIgnoreCase) ||
                       path.Contains("playlist.txt", StringComparison.OrdinalIgnoreCase);
         var url = UrlSanitizer.IsUrl(path) || hlsFile;
-        var extProgressive = url && StreamProbe.Extension(path) is ".mp4" or ".mkv" or ".webm" or ".mov" or ".m4v" or ".avi";
-        var youtube = LooksLikeYouTubeMedia(path);
         var live = url && kind switch
         {
             StreamKind.Live => true,
             StreamKind.Vod => false,
-            _ => !extProgressive && !youtube
+            _ => LooksLikeLiveWindow(path)
         };
 
-        ApplyNetworkIdentity(path, userAgent, referer);
+        ApplyNetworkIdentity(path, userAgent, referer, httpHeaders);
         TrySetProperty("force-seekable", live ? "no" : "yes");
         if (!live &&
             (path.Contains("tiktok", StringComparison.OrdinalIgnoreCase) ||
@@ -1890,7 +1889,7 @@ public sealed class PlayerHost : IDisposable
         title is not ("videoplayback" or "watch" or "live" or "GrokPlayer") &&
         !UrlSanitizer.IsUrl(title);
 
-    private void ApplyNetworkIdentity(string path, string? userAgent, string? referer = null)
+    private void ApplyNetworkIdentity(string path, string? userAgent, string? referer = null, string? httpHeaders = null)
     {
         if (LooksLikeYouTubeMedia(path))
         {
@@ -1916,7 +1915,13 @@ public sealed class PlayerHost : IDisposable
         var origin = StreamCatalog.PageOrigin(page) ?? StreamCatalog.PageOrigin(path) ?? page;
         TrySetProperty("user-agent", string.IsNullOrWhiteSpace(userAgent) ? StreamCatalog.ChromeUa : userAgent);
         TrySetProperty("referrer", page);
-        TrySetProperty("http-header-fields", "Referer: " + page + ",Origin: " + origin.TrimEnd('/'));
+        var headers = "Referer: " + page + ",Origin: " + origin.TrimEnd('/');
+        if (!string.IsNullOrWhiteSpace(httpHeaders) &&
+            !httpHeaders.Contains('\r') && !httpHeaders.Contains('\n'))
+        {
+            headers += "," + httpHeaders.Trim();
+        }
+        TrySetProperty("http-header-fields", headers);
     }
 
     private static bool LooksLikeYouTubeMedia(string path) =>
@@ -1931,7 +1936,7 @@ public sealed class PlayerHost : IDisposable
             return false;
         }
 
-        return StreamProbe.Extension(path) is not (".mp4" or ".mkv" or ".webm" or ".mov" or ".m4v" or ".avi");
+        return StreamProbe.ClassifyUrl(path) == StreamKind.Live;
     }
 
     private TimeSpan? SeekLimit_NoLock()

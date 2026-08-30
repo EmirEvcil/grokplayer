@@ -113,8 +113,17 @@ const filmApi = load({
     return sel === "iframe" ? [frame] : [box, frame];
   }
 }, "https://filmizlehell.net/film/1750-katil-makine-izle");
-assert.equal(filmApi.primarySurfaces().length, 0, "no chip until the embed is playing");
+assert.equal(filmApi.primarySurfaces().length, 0, "iframe-only pages wait until media is playing");
 filmApi.noteChildPlaying();
-assert.equal(filmApi.primarySurfaces()[0], frame);
+assert.equal(filmApi.primarySurfaces()[0], frame, "filmizlehell chip appears once the player is playing");
+
+const googleFrame = el("iframe", { src: "https://www.google.com/s?tbm=vid", w: 800, h: 450, className: "video-player" });
+const googleApi = load({
+  querySelectorAll(sel) {
+    return sel === "iframe" ? [googleFrame] : [];
+  }
+}, "https://www.google.com/search?q=wikipedia");
+assert.equal(googleApi.primarySurfaces().length, 0, "Google search does not get a chip");
+assert.ok(googleApi.isSearchPage());
 
 console.log("sites.test.mjs ok");

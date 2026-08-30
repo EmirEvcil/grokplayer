@@ -18,6 +18,8 @@ function el(tag, attrs, children) {
     paused: attrs.paused !== false,
     muted: !!attrs.muted,
     currentTime: attrs.currentTime || 0,
+    duration: attrs.duration || 0,
+    ended: !!attrs.ended,
     isConnected: true,
     clientWidth: attrs.w || 640,
     clientHeight: attrs.h || 360,
@@ -70,19 +72,27 @@ function el(tag, attrs, children) {
   return node;
 }
 
-function load(doc, perf, href) {
+function load(doc, perf, href, now) {
   const parsed = new URL(href || "https://example.com/watch");
+  let clock = now || 0;
   const context = {
     window: { innerWidth: 1280, innerHeight: 800 },
     chrome: null,
     URL,
     location: { href: parsed.href, hostname: parsed.hostname, pathname: parsed.pathname },
     document: doc,
-    performance: { getEntriesByType: () => perf || [] }
+    performance: {
+      now: () => clock,
+      getEntriesByType: () => perf || []
+    }
   };
   vm.createContext(context);
   vm.runInContext(source, context);
-  return context.window.GrokPlayerSniff;
+  const api = context.window.GrokPlayerSniff;
+  api.setNow = (value) => {
+    clock = value;
+  };
+  return api;
 }
 
 const ad = "https://pubads.g.doubleclick.net/preroll.mp4";
@@ -131,6 +141,7 @@ const api = load(doc, [
 
 const tiktokCdn = "https://v16-webapp.tiktokcdn.com/video/tos/useast2a/foo?mime_type=video_mp4";
 const instagramCdn = "https://scontent.cdninstagram.com/o1/v/t16/f2/m86/foo";
+assert.ok(api.looksMedia("https://i.collaborate.pics/cdn/down/abc/index.m3u8"));
 assert.ok(api.looksMedia(tiktokCdn), "TikTok CDN URLs have no file extension");
 assert.ok(api.looksMedia(instagramCdn), "Instagram video CDN URLs have no file extension");
 assert.ok(api.looksImage("https://scontent.cdninstagram.com/v/t51.2885-15/foo.jpg"));
@@ -155,9 +166,37 @@ assert.equal(
 assert.ok(api.looksAd(ad));
 assert.ok(api.looksAd(rekla), "site-hosted /rekla/ bumpers are ads");
 assert.ok(!api.looksAd(movie));
+assert.equal(api.looksShortAd("https://media.example/short-film.mp4", 30, "https://media.example/watch"), false);
 assert.ok(!api.looksAd(hlsTxt));
 assert.ok(api.looksMedia(hlsTxt));
+assert.ok(api.looksClosePlaylist("https://cdn/hls/film.mp4/txt/master.txt"));
+assert.ok(!api.looksMedia("https://cdn/hls/film.mp4/txt/master.txt"));
 assert.ok(api.looksImageList("https://cdn/hls/film.mp4/txt/master.txt"));
+assert.equal(
+  api.pickTransfer(
+    "https://cdn/hls/film.mp4/txt/master.txt",
+    [{ url: "https://hls8.playmix.uno/hls/film.mp4/master.txt" }, { url: "https://cdn/hls/film.mp4/txt/master.txt" }],
+    "https://www.hdfilmcehennemi.nl/the-last-scene-2026/",
+    false,
+    false,
+    7200
+  ),
+  "https://hls8.playmix.uno/hls/film.mp4/master.txt",
+  "Close JPEG playlist is not transferred when real HLS exists"
+);
+assert.ok(api.looksAd("https://i.marmorated.pics/v/5c45826a72d646cf5aecd1d3f500a4bb.mp4"));
+assert.equal(
+  api.pickTransfer(
+    "https://i.marmorated.pics/v/ad.mp4",
+    [{ url: "https://i.marmorated.pics/v/ad.mp4" }, { url: movie }],
+    "https://dizipal2121.com/bolum/x",
+    false,
+    false,
+    15
+  ),
+  movie,
+  "dizipal preroll is not transferred"
+);
 assert.ok(!api.looksMedia("https://cdn/hls/film.mp4/image000.jpg"));
 assert.ok(api.mediaScore(hlsTxt) > api.mediaScore(movie.replace("master.m3u8", "360.mp4")));
 assert.ok(api.mediaScore(rumbleMp4) < api.mediaScore(rumbleHls));
@@ -242,8 +281,8 @@ const adOnlyDoc = {
 };
 const hdfilmOnlyAds = load(adOnlyDoc, [{ name: rekla }, { name: ad }], "https://www.hdfilmcehennemi.nl/the-last-scene-2026/");
 const hdfilmSniff = hdfilmOnlyAds();
-assert.equal(hdfilmSniff.url, "https://www.hdfilmcehennemi.nl/the-last-scene-2026/");
-assert.ok(!hdfilmSniff.url.includes("/rekla/"));
+assert.equal(hdfilmSniff.url, "", "ads-only pages do not transfer the HTML page");
+assert.ok(!String(hdfilmSniff.url).includes("/rekla/"));
 
 const embed = el("iframe", { className: "close", "data-src": "https://hdfilmcehennemi.mobi/video/embed/Tr4Yz605cMT/?rapidrame_id=x", w: 800, h: 450 });
 const playerBox = el("div", { className: "player-container video-player-container-here", w: 800, h: 450 }, [embed]);
@@ -258,9 +297,9 @@ const embedDoc = {
   }
 };
 const embedApi = load(embedDoc, [{ name: rekla }], "https://www.hdfilmcehennemi.nl/the-last-scene-2026/");
-assert.equal(embedApi.primarySurfaces().length, 0, "hdfilm must not show a chip before the film is playing");
+assert.equal(embedApi.primarySurfaces().length, 0, "hdfilm waits for the iframe to play");
 embedApi.noteChildPlaying();
-assert.equal(embedApi.primarySurfaces()[0], embed);
+assert.equal(embedApi.primarySurfaces()[0], embed, "hdfilm chip appears once the player is playing");
 
 const pausedClip = el("video", { src: movie, w: 960, h: 540, paused: true, currentTime: 0 });
 const otherApi = load({
@@ -308,9 +347,9 @@ const filmDoc = {
   }
 };
 const filmApi = load(filmDoc, [], "https://filmizlehell.net/film/1750-katil-makine-izle");
-assert.equal(filmApi.primarySurfaces().length, 0, "filmizlehell chip waits until the embed plays");
+assert.equal(filmApi.primarySurfaces().length, 0, "filmizlehell waits for the iframe to play");
 filmApi.noteChildPlaying();
-assert.equal(filmApi.primarySurfaces()[0], playturka);
+assert.equal(filmApi.primarySurfaces()[0], playturka, "filmizlehell chip appears once the player is playing");
 
 assert.equal(api.pageKind("https://kick.com/rootthegamer"), "live");
 assert.equal(api.pageKind("https://kick.com/rootthegamer/videos/abc"), "vod");
@@ -357,6 +396,27 @@ assert.equal(
   kickVodHls,
   "Kick VOD transfers the captured HLS"
 );
+const kickLiveHls = "https://fa723fc1b171.us-west-2.playback.live-video.net/api/video/v1/us-west-2.channel.m3u8";
+const kickDatedHls = "https://stream.kick.com/3c81249a5ce0/ivs/v1/196233775518/jHtppgXXoKhP/2026/8/27/23/20/6IEGUcHLLWRa/media/hls/master.m3u8";
+assert.equal(
+  kickVodApi.pickTransfer(kickLiveHls, [{ url: kickLiveHls }, { url: kickDatedHls }], kickVodPage, true, false),
+  kickDatedHls,
+  "Kick VOD does not transfer the channel live playlist"
+);
+assert.ok(kickVodApi.looksKickLive(kickLiveHls));
+assert.ok(kickVodApi.mediaScore(kickDatedHls) > kickVodApi.mediaScore(kickLiveHls));
+assert.equal(
+  kickVodApi.pickTransfer(
+    "https://cdn.kick/clip12.mp4",
+    [{ url: "https://cdn.kick/clip12.mp4" }, { url: kickDatedHls }],
+    kickVodPage,
+    true,
+    false,
+    12
+  ),
+  kickDatedHls,
+  "Kick VOD does not transfer a 12s clip"
+);
 
 const igFirst = "https://scontent.cdninstagram.com/o1/v/t16/reel-one";
 const igSecond = "https://scontent.cdninstagram.com/o1/v/t16/reel-two";
@@ -383,6 +443,27 @@ assert.ok(igApi.isActivePlayback(igNow));
 assert.ok(!igApi.isActivePlayback(igPrev));
 const igSniff = igApi(igNow);
 assert.equal(igSniff.url, igSecond, "a blob reel transfers the latest unused Instagram CDN, not the first reel");
+
+const exactIg = "https://instagram.fadb5-1.fna.fbcdn.net/o1/v/t2/f2/m86/exact-reel.mp4";
+const otherIg = "https://scontent.cdninstagram.com/o1/v/t16/preloaded-other-reel";
+const igBootDoc = {
+  ...igDoc,
+  scripts: [{
+    textContent: JSON.stringify({
+      require: [{
+        data: {
+          edges: [
+            { node: { code: "other", video_versions: [{ url: otherIg }] } },
+            { node: { code: "DcodW89iBRK", video_versions: [{ url: exactIg }] } }
+          ]
+        }
+      }]
+    })
+  }]
+};
+const exactIgApi = load(igBootDoc, [{ name: otherIg }], "https://www.instagram.com/reels/DcodW89iBRK/");
+assert.equal(exactIgApi.instagramPageMedia(), exactIg);
+assert.equal(exactIgApi(igNow).url, exactIg, "a direct Reel URL never opens another preloaded feed video");
 
 const igAud1 = "https://scontent.cdninstagram.com/o1/v/t16/a1?mime_type=audio_mp4";
 const igVid1 = "https://scontent.cdninstagram.com/o1/v/t16/v1?mime_type=video_mp4";
@@ -417,5 +498,224 @@ assert.equal(timedIg(blobOne).audioUrl, igAud1, "audio-only is a sidecar, not th
 assert.equal(timedIg.markPlayed(blobTwo, 520), igVid2, "second reel binds its own later video");
 assert.equal(timedIg(blobTwo).url, igVid2);
 assert.equal(timedIg(blobTwo).audioUrl, igAud2);
+
+const closeJpeg = "https://cdn.example/hls/film.mp4/txt/master.txt";
+assert.equal(api.siblingPlaylist(closeJpeg), "https://cdn.example/hls/film.mp4/master.txt");
+assert.ok(api.looksMedia(api.siblingPlaylist(closeJpeg)));
+assert.ok(!api.looksMedia(closeJpeg));
+
+const episode = "https://cdn.film/episode/master.m3u8";
+const preroll = "https://i.marmorated.pics/v/ad.mp4";
+const dizipalBlob = el("video", {
+  src: "blob:https://dizipal2121.com/x",
+  w: 960,
+  h: 540,
+  paused: false,
+  currentTime: 40,
+  duration: 4140
+});
+const dizipalWrap = el("div", { className: "jwplayer" }, [dizipalBlob]);
+dizipalBlob.parentElement = dizipalWrap;
+const dizipalDoc = {
+  title: "Episode",
+  querySelectorAll(sel) {
+    if (sel === "iframe") {
+      return [];
+    }
+    if (sel === "video, *") {
+      return [dizipalWrap, dizipalBlob];
+    }
+    return [dizipalBlob];
+  }
+};
+const dizipalApi = load(dizipalDoc, [
+  { name: preroll, responseEnd: 50 },
+  { name: episode, responseEnd: 80 }
+], "https://dizipal2121.com/bolum/yuzuklerin-efendisi-guc-yuzukleri-1-sezon-6-bolum");
+dizipalApi.markPlayed(dizipalBlob, 40);
+dizipalApi.setNow(20000);
+assert.equal(dizipalApi.mediaForVideo(dizipalBlob), episode, "Open binds the episode, not the preroll");
+assert.equal(dizipalApi.current().url, episode);
+assert.equal(dizipalApi.current().playingNow, true);
+
+const twoSec = "https://cdn.ads.example/bumper.mp4";
+const hourShow = "https://cdn.film/episode-long/master.m3u8";
+const bumper = el("video", {
+  src: twoSec,
+  w: 960,
+  h: 540,
+  paused: false,
+  currentTime: 1,
+  duration: 2,
+  className: "preroll"
+});
+const bumperWrap = el("div", { className: "preroll-ad", id: "prerollAd" }, [bumper]);
+bumper.parentElement = bumperWrap;
+const longVid = el("video", {
+  src: hourShow,
+  w: 960,
+  h: 540,
+  paused: false,
+  currentTime: 20,
+  duration: 4140
+});
+const longWrap = el("div", { className: "jwplayer" }, [longVid]);
+longVid.parentElement = longWrap;
+const prerollDoc = {
+  title: "Episode",
+  querySelectorAll(sel) {
+    if (sel === "iframe") {
+      return [];
+    }
+    if (sel === "video, *") {
+      return [bumperWrap, bumper, longWrap, longVid];
+    }
+    return [bumper, longVid];
+  }
+};
+const prerollApi = load(prerollDoc, [{ name: twoSec }, { name: hourShow }], "https://dizipal2121.com/bolum/yuzuklerin-efendisi-guc-yuzukleri-1-sezon-6-bolum");
+assert.ok(prerollApi.isPrerollVideo(bumper), "a 2s clip is detected as a preroll");
+assert.ok(!prerollApi.isPrerollVideo(longVid));
+assert.equal(prerollApi.primarySurfaces()[0], longVid, "the chip follows the long episode, not the preroll");
+assert.equal(prerollApi.current().url, hourShow, "Open transfers the 1h09 episode, not a 2s bumper");
+prerollApi.rememberShortMedia(twoSec, 2);
+assert.equal(
+  prerollApi.pickTransfer(twoSec, [{ url: twoSec }, { url: hourShow }], "https://dizipal2121.com/bolum/x", false, false, 4140),
+  hourShow,
+  "a known short bumper is never transferred"
+);
+
+const configuredPreroll = el("video", {
+  src: preroll,
+  w: 960,
+  h: 540,
+  paused: false,
+  currentTime: 1,
+  duration: 2,
+  id: "prerollVideo"
+});
+const configuredAd = el("div", { className: "preroll-ad", id: "prerollAd" }, [configuredPreroll]);
+const configuredPlayer = el("div", {
+  className: "video-player-container",
+  id: "videoContainer",
+  "data-cfg": "encoded-real-player",
+  w: 960,
+  h: 540
+}, [configuredAd]);
+const configuredDoc = {
+  title: "Configured episode",
+  querySelectorAll(sel) {
+    if (sel === "iframe") return [];
+    if (sel === "video, *") return [configuredPlayer, configuredAd, configuredPreroll];
+    if (sel.includes("[data-cfg]")) return [configuredPlayer];
+    return [configuredPreroll];
+  }
+};
+const configuredApi = load(configuredDoc, [{ name: preroll }], "https://dizipal2121.com/bolum/configured-episode");
+assert.equal(configuredApi.primarySurfaces()[0], configuredPlayer, "a configured player wins while only its preroll video exists");
+assert.equal(configuredApi.current().url, "", "the preroll URL is not transferred from a configured player");
+assert.equal(configuredApi.current().watchUrl, "https://dizipal2121.com/bolum/configured-episode", "the desktop resolves the real player from the page config");
+
+const kickClip = "https://stream.kick.com/ivs/clip12/media/hls/master.m3u8";
+const kickVodLong = "https://stream.kick.com/3c81249a5ce0/ivs/v1/196233775518/jHtppgXXoKhP/2026/8/27/23/20/6IEGUcHLLWRa/media/hls/master.m3u8";
+const kickBlob = el("video", {
+  src: "blob:https://kick.com/vod",
+  w: 960,
+  h: 540,
+  paused: false,
+  currentTime: 30,
+  duration: 5400
+});
+const kickWrap = el("div", { className: "player" }, [kickBlob]);
+kickBlob.parentElement = kickWrap;
+const kickVodDoc = {
+  title: "Kick VOD",
+  querySelectorAll(sel) {
+    if (sel === "iframe") {
+      return [];
+    }
+    if (sel === "video, *") {
+      return [kickWrap, kickBlob];
+    }
+    return [kickBlob];
+  }
+};
+const kickNow = load(kickVodDoc, [
+  { name: kickClip, responseEnd: 20 },
+  { name: kickVodLong, responseEnd: 40 }
+], kickVodPage);
+kickNow.markPlayed(kickBlob, 30);
+assert.equal(kickNow.mediaForVideo(kickBlob), kickVodLong, "Kick VOD binds the dated HLS, not a 12s clip");
+kickNow.setNow(25000);
+assert.equal(
+  kickNow.mediaForVideo(kickBlob),
+  kickVodLong,
+  "durationchange must not wipe the VOD bind and fall back to a clip"
+);
+assert.equal(kickNow.current().url, kickVodLong);
+assert.equal(kickNow.current().playingNow, true);
+
+const firstMovie = "https://cdn.film/one/master.m3u8";
+const secondMovie = "https://cdn.film/two/master.m3u8";
+const switched = el("video", {
+  src: "blob:https://example.com/2",
+  w: 960,
+  h: 540,
+  paused: false,
+  currentTime: 8,
+  duration: 7200
+});
+const switchWrap = el("div", { className: "jwplayer" }, [switched]);
+switched.parentElement = switchWrap;
+const switchDoc = {
+  title: "Switch",
+  querySelectorAll(sel) {
+    if (sel === "iframe") {
+      return [];
+    }
+    if (sel === "video, *") {
+      return [switchWrap, switched];
+    }
+    return [switched];
+  }
+};
+const switchApi = load(switchDoc, [{ name: firstMovie }], "https://example.com/one");
+switchApi.markPlayed(switched, 10);
+assert.equal(switchApi.current().url, firstMovie);
+const switchApi2 = load(switchDoc, [{ name: secondMovie }], "https://example.com/two");
+switchApi2.markPlayed(switched, 20);
+assert.equal(switchApi2.current().url, secondMovie, "Open follows the media that is playing now");
+
+const rapidFrameUrl = "https://rapidvid.net/vod/v1x7c5739a3";
+const rapidFrame = el("iframe", { src: rapidFrameUrl, w: 960, h: 540, className: "video-player" });
+const frameBody = el("body", {}, [rapidFrame]);
+const frameDoc = {
+  title: "Embedded movie",
+  body: frameBody,
+  documentElement: frameBody,
+  querySelectorAll(sel) {
+    if (sel === "iframe") return [rapidFrame];
+    if (sel === "video" || sel === "video, *") return [];
+    return [];
+  }
+};
+const frameApi = load(frameDoc, [], "https://www.fullhdfilmizlesene.now/film/supergirl/");
+assert.equal(frameApi.current().url, rapidFrameUrl, "an unresolved player iframe is sent to the desktop resolver");
+assert.equal(frameApi.current().watchUrl, rapidFrameUrl);
+
+const lazyRapidFrame = el("iframe", { src: "", "data-src": rapidFrameUrl, w: 960, h: 540, className: "video-player" });
+const lazyFrameBody = el("body", {}, [lazyRapidFrame]);
+const lazyFrameDoc = {
+  title: "Lazy embedded movie",
+  body: lazyFrameBody,
+  documentElement: lazyFrameBody,
+  querySelectorAll(sel) {
+    if (sel === "iframe") return [lazyRapidFrame];
+    if (sel === "video" || sel === "video, *") return [];
+    return [];
+  }
+};
+const lazyFrameApi = load(lazyFrameDoc, [], "https://www.fullhdfilmizlesene.now/film/supergirl/");
+assert.equal(lazyFrameApi.current().url, rapidFrameUrl, "a visible lazy iframe is transferred before its src is activated");
 
 console.log("sniff.test.mjs ok");

@@ -17,7 +17,9 @@ public sealed class YouTubePlayable
         string? captionUrl = null,
         bool hlsSubtitles = false,
         string? storyboardSpec = null,
-        string? referer = null)
+        string? referer = null,
+        string? formatHint = null,
+        string? httpHeaders = null)
     {
         VideoId = videoId;
         MediaUrl = mediaUrl;
@@ -31,6 +33,8 @@ public sealed class YouTubePlayable
         HlsSubtitles = hlsSubtitles;
         StoryboardSpec = storyboardSpec;
         Referer = referer;
+        FormatHint = formatHint;
+        HttpHeaders = httpHeaders;
     }
 
     public string VideoId { get; }
@@ -47,6 +51,10 @@ public sealed class YouTubePlayable
     public string? StoryboardSpec { get; }
 
     public string? Referer { get; }
+
+    public string? FormatHint { get; }
+
+    public string? HttpHeaders { get; }
 
     public YouTubePlayable WithUserAgent(string? userAgent) =>
         Copy(userAgent: userAgent);
@@ -78,7 +86,9 @@ public sealed class YouTubePlayable
         string? captionUrl = null,
         bool? hlsSubtitles = null,
         string? storyboardSpec = null,
-        string? referer = null) =>
+        string? referer = null,
+        string? formatHint = null,
+        string? httpHeaders = null) =>
         new(
             VideoId,
             mediaUrl ?? MediaUrl,
@@ -91,7 +101,9 @@ public sealed class YouTubePlayable
             captionUrl ?? CaptionUrl,
             hlsSubtitles ?? HlsSubtitles,
             storyboardSpec ?? StoryboardSpec,
-            referer ?? Referer);
+            referer ?? Referer,
+            formatHint ?? FormatHint,
+            httpHeaders ?? HttpHeaders);
 }
 
 public static class YouTubeCatalog
@@ -684,6 +696,73 @@ public static class YouTubeCatalog
         }
     }
 
+    public static string Diagnose(string urlOrId)
+    {
+        if (!TryReadVideoId(urlOrId, out var id))
+        {
+            return "bad-id";
+        }
+
+        var lines = new List<string> { "id=" + id };
+        WarmHttp();
+        var page = FetchText("https://www.youtube.com/watch?v=" + id + "&hl=en&bpctr=9999999999&has_verified=1", ChromeUa);
+        var visitor = ExtractVisitorData(page);
+        var pageJson = ExtractAssignedJson(page, "ytInitialPlayerResponse");
+        lines.Add(
+            "page bytes=" + (page?.Length ?? 0) +
+            " visitor=" + (string.IsNullOrWhiteSpace(visitor) ? "no" : "yes") +
+            " playerJson=" + (pageJson?.Length ?? 0) +
+            " status=" + PlayabilityOf(pageJson) +
+            " parsed=" + (pageJson is null ? "n/a" : ParsePlayerResponse(pageJson, id) is null ? "null" : "ok"));
+        foreach (var client in PlayerClients(id, visitor, "en"))
+        {
+            var json = FetchPlayer(client, visitor);
+            lines.Add(
+                client.Name +
+                " bytes=" + (json?.Length ?? 0) +
+                " status=" + PlayabilityOf(json) +
+                " parsed=" + (json is null ? "n/a" : ParsePlayerResponse(json, id) is null ? "null" : "ok"));
+        }
+
+        return string.Join(" | ", lines);
+    }
+
+    private static string PlayabilityOf(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json) || !json.TrimStart().StartsWith('{'))
+        {
+            return "empty";
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var status = document.RootElement.TryGetProperty("playabilityStatus", out var el)
+                ? ReadString(el, "status") ?? "?"
+                : "no-status";
+            var reason = document.RootElement.TryGetProperty("playabilityStatus", out var play)
+                ? ReadString(play, "reason")
+                : null;
+            var hls = document.RootElement.TryGetProperty("streamingData", out var streaming) &&
+                      streaming.TryGetProperty("hlsManifestUrl", out _);
+            var dash = document.RootElement.TryGetProperty("streamingData", out streaming) &&
+                       streaming.TryGetProperty("dashManifestUrl", out _);
+            var formats = document.RootElement.TryGetProperty("streamingData", out streaming) &&
+                          streaming.TryGetProperty("formats", out var list)
+                ? list.GetArrayLength()
+                : 0;
+            return status +
+                   (string.IsNullOrWhiteSpace(reason) ? "" : "/" + reason) +
+                   " hls=" + hls +
+                   " dash=" + dash +
+                   " formats=" + formats;
+        }
+        catch (Exception)
+        {
+            return "bad-json";
+        }
+    }
+
     public static YouTubePlayable? Resolve(string urlOrId, Func<string, string?>? fetchPlayer = null) =>
         Resolve(urlOrId, fetchPlayer, null, null);
 
@@ -698,13 +777,21 @@ public static class YouTubeCatalog
 
         lock (ResolveGate)
         {
+            WarmHttp();
             var first = ResolveUnlocked(id, fetchPlayer, audioLang, subLang);
             if (first is not null)
             {
                 return first;
             }
 
-            Thread.Sleep(250);
+            Thread.Sleep(400);
+            var second = ResolveUnlocked(id, fetchPlayer, audioLang, subLang);
+            if (second is not null)
+            {
+                return second;
+            }
+
+            Thread.Sleep(800);
             return ResolveUnlocked(id, fetchPlayer, audioLang, subLang);
         }
     }
@@ -908,7 +995,29 @@ public static class YouTubeCatalog
             CookieContainer = cookies,
             UseCookies = true
         };
-        return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(8) };
+        return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(15) };
+    }
+
+    private static int _warmed;
+
+    private static void WarmHttp()
+    {
+        if (Interlocked.Exchange(ref _warmed, 1) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://www.youtube.com/");
+            request.Headers.TryAddWithoutValidation("User-Agent", ChromeUa);
+            request.Headers.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
+            using var response = Http.Send(request);
+            response.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+        }
+        catch (Exception)
+        {
+        }
     }
 
     private static IEnumerable<InnertubeClient> PlayerClients(string videoId, string? visitor, string hl = "en")

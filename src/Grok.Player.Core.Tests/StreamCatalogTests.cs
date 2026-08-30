@@ -37,11 +37,18 @@ public sealed class StreamCatalogTests
         Assert.False(StreamCatalog.LooksResolvable("https://cdn.example/movie.m3u8"));
         Assert.False(StreamCatalog.LooksResolvable("https://www.youtube.com/watch?v=dQw4w9wgBcQ"));
         Assert.True(StreamCatalog.LooksResolvable("https://rumble.com/v7elrde-the-time-norm-macdonald-crashed-the-youtube-awards.html"));
+        Assert.Equal("v7cfefw", StreamCatalog.RumbleEmbedIdFromHtml(
+            """<iframe src="https://rumble.com/embed/v7cfefw/" width="1920"></iframe>"""));
         Assert.True(StreamCatalog.LooksResolvable("https://www.tiktok.com/@hsnphlvnoglu/video/7676616845960531221"));
         Assert.True(StreamCatalog.LooksResolvable("https://www.hdfilmcehennemi.nl/the-last-scene-2026/"));
+        Assert.Equal("https://rumble.com/", StreamCatalog.PageOrigin("https://rumble.com/v7elrde-the-time-norm-macdonald-crashed-the-youtube-awards.html"));
         Assert.True(StreamCatalog.IsDirectMedia("https://v16-webapp.tiktokcdn.com/video/tos/foo"));
         Assert.True(StreamCatalog.IsDirectMedia("https://rumble.com/hls-vod/abc/playlist.m3u8"));
         Assert.True(StreamCatalog.IsDirectMedia("https://hls8.playmix.uno/hls/film.mp4/master.txt"));
+        Assert.True(StreamCatalog.RequiresPlayerPage(
+            "https://fastplay.mom/manifests/episode/master.txt?verify=123-proof"));
+        Assert.False(StreamCatalog.RequiresPlayerPage(
+            "https://hls8.playmix.uno/hls/film.mp4/master.txt"));
         Assert.True(StreamCatalog.IsDirectMedia("https://scontent.cdninstagram.com/o1/v/t16/f2/m86/foo"));
         Assert.False(StreamCatalog.IsDirectMedia("https://scontent.cdninstagram.com/v/t51.2885-15/foo.jpg"));
         Assert.True(StreamCatalog.LooksImagePlaylistUrl("https://scontent.cdninstagram.com/v/t51.2885-15/foo.jpg"));
@@ -57,6 +64,11 @@ public sealed class StreamCatalogTests
         var urls = StreamCatalog.RumbleHlsCandidates("v7epfng");
         Assert.Contains("https://rumble.com/hls-vod/v7epfng/playlist.m3u8", urls);
         Assert.Contains("https://rumble.com/hls-vod/7epfng/playlist.m3u8", urls);
+        Assert.True(StreamCatalog.IsDirectMedia("https://rumble.com/hls-vod/v7cfefw/playlist.m3u8"));
+        Assert.Equal(
+            "v7cfefw",
+            StreamCatalog.RumbleEmbedIdFromHtml(
+                """<div><iframe src="https://rumble.com/embed/v7cfefw/?pub=4"></iframe></div>"""));
     }
 
     [Theory]
@@ -210,6 +222,19 @@ public sealed class StreamCatalogTests
             StreamKind.Live);
         Assert.Same(live, StreamCatalog.AttachVodCaptions(live, "en"));
         Assert.True(string.IsNullOrWhiteSpace(live.CaptionUrl));
+        var vod = new YouTubePlayable(
+            "dailymotion|xb23uyu",
+            "https://cdn.example/vod.m3u8",
+            "Film",
+            StreamKind.Vod);
+        Assert.Same(vod, StreamCatalog.AttachVodCaptions(vod, null));
+        Assert.True(string.IsNullOrWhiteSpace(vod.CaptionUrl));
+        Assert.True(StreamCatalog.LooksKickLivePlayback(
+            "https://fa723fc1b171.us-west-2.playback.live-video.net/api/video/v1/us-west-2.channel.m3u8"));
+        Assert.False(StreamCatalog.LooksKickLivePlayback(
+            "https://stream.kick.com/3c81249a5ce0/ivs/v1/196233775518/jHtppgXXoKhP/2026/8/27/23/20/x/media/hls/master.m3u8"));
+        Assert.False(StreamCatalog.LooksKickLivePlayback(
+            "https://fa723fc1b171.us-west-2.playback.live-video.net/api/video/v1/us-west-2.vod.m3u8"));
     }
 
     [Fact]
@@ -413,6 +438,10 @@ public sealed class StreamCatalogTests
             "https://srv9.cdnimages2898.shop/hls/ongoru-2026-webdl-tt44147164mp4-Tr4Yz605cMT.mp4/txt/master.txt",
             packed);
         Assert.True(StreamCatalog.LooksImagePlaylistUrl(packed));
+        Assert.Equal(
+            "https://srv9.cdnimages2898.shop/hls/ongoru-2026-webdl-tt44147164mp4-Tr4Yz605cMT.mp4/master.txt",
+            StreamCatalog.SiblingPlaylistUrl(packed));
+        Assert.False(StreamCatalog.LooksImagePlaylistUrl(StreamCatalog.SiblingPlaylistUrl(packed)));
         Assert.True(StreamCatalog.IsImagePlaylist("#EXTINF:7,\nhttps://cdn/image000.jpg"));
         Assert.True(StreamCatalog.MediaScore(packed) < 0);
         const string packedHtml =
@@ -421,6 +450,97 @@ public sealed class StreamCatalogTests
             {"contentUrl":"https://hls8.playmix.uno/hls/filmakinesimp4-f9gx1M12BwC.mp4/master.txt"}
             """;
         Assert.Equal(master, StreamCatalog.PickMediaUrl(StreamCatalog.MediaUrlsIn(packedHtml)));
+    }
+
+    [Fact]
+    public void Generic_embedded_players_decode_config_and_obfuscated_media()
+    {
+        const string rapid =
+            "==gPH1GZ0c2aPNXaKB1eqtFV8tjbcVUcapVMt1mZPRDWVxXMXdWex52Y2MXSP52Qsh1RcllTTlEbPp1RuZGcypEVH9mVUdTbuRWUI9mUz1kMm1VcYVlSulkVMVUVVJXeycmYyB3V18WbctVdtVWamRDVQNHWV1Hay8EdzUTTtlFNkZ3Tv9UN7AnW8l1MctmMZRmdl1mT8xjeOljTKZWMUtkY";
+        Assert.Equal(
+            "https://s27.imagesbox.cloud/ml/H3IjMKWanKWfYwVjZwLhI0IPYHEZYwRjBQOjYxEIDHjhrQV2AP1VER0d0zxnJ1uM2ImLz94YzAfo3Ixs0xi27vr1",
+            StreamCatalog.DecodeRapidPlayerUrl(rapid));
+        Assert.Equal(
+            StreamCatalog.DecodeRapidPlayerUrl(rapid),
+            StreamCatalog.PickMediaUrl(StreamCatalog.MediaUrlsIn($"jwSetup.sources=[{{file:av('{rapid}')}}]")));
+
+        const string config = "eyJ2IjoiaHR0cHM6Ly9pbWFnZXN0b28uY29tL3ZpZGVvLzZhODNjNzMxNjYwZmNjOWYxNGUxY2UwYjYyZDQ1ZWI5IiwidCI6ImVtYmVkIn0=";
+        var embeds = StreamCatalog.PlayerEmbedsIn(
+            $"<div class='video-player-container' data-cfg='{config}'></div>",
+            "https://example.test/watch/movie");
+        Assert.Contains("https://imagestoo.com/video/6a83c731660fcc9f14e1ce0b62d45eb9", embeds);
+
+        const string dean =
+            "eval(function(p,a,c,k,e,d){return p}('0(\"1\")',62,2,'file|https://cdn.example/master.m3u8'.split('|'),0,{}))";
+        Assert.Contains("file(\"https://cdn.example/master.m3u8\")", StreamCatalog.UnpackDeanEdwards(dean));
+        Assert.Contains("https://cdn.example/master.m3u8", StreamCatalog.MediaUrlsIn(dean));
+    }
+
+    [Fact]
+    public void CryptoJs_encrypted_player_documents_are_decrypted_generically()
+    {
+        const string cipher =
+            "U2FsdGVkX1/chkNoXTZpjNDg0Eh/gmWLqfgiPOn6Mlf5C7j0J6q/5p6SEN56IDsR9cDGjJ6TIK6SomN4XYRJjAn5fnCJqYbm3GTjQe1YWCsW9vStnoWPNSqeOSyQ48fk";
+        var html = $"document.write(CryptoJS.AES.decrypt(\"{cipher}\",\"secret\").toString(CryptoJS.enc.Utf8));";
+
+        var decrypted = Assert.Single(StreamCatalog.DecryptCryptoJsDocuments(html));
+
+        Assert.Contains("https://cdn.example/player/master.m3u8", decrypted);
+        Assert.Contains("https://cdn.example/player/master.m3u8", StreamCatalog.MediaUrlsIn(decrypted));
+
+        const string endpoint = "https://dbx.example/embed/sheila/video-id";
+        var embeds = StreamCatalog.PlayerEmbedsIn($"jwplayer('p').setup({{ file: '{endpoint}' }});", "https://dbx.example/embed/video-id");
+        Assert.Contains(endpoint, embeds);
+        Assert.True(StreamCatalog.LooksMediaManifest("  \n#EXTM3U\n#EXT-X-VERSION:3"));
+
+        const string wordpress =
+            "var videoAjax={ajaxurl:'https:\\/\\/site.example\\/wp-admin\\/admin-ajax.php',nonce:'abc123'};" +
+            "var request={action:'get_video_url'};" +
+            "<a data-post-id='1432' data-player-name='SetPlay'></a>";
+        var fields = StreamCatalog.WordPressAjaxPlayerFields(wordpress, "https://site.example/watch/episode");
+        Assert.NotNull(fields);
+        Assert.Equal("https://site.example/wp-admin/admin-ajax.php", fields.Value.Endpoint);
+        Assert.Equal("abc123", fields.Value.Nonce);
+        Assert.Equal("1432", fields.Value.PostId);
+        Assert.Contains("SetPlay", fields.Value.Players);
+
+        const string spg = "SPG.cerceve('frame','GxEXAhZOXEoTHgQNFhdNFx0VHhUPF0oRHgcGFkoVEQYfEQEaXQAbEwgEHwA=','c2VjcmV0');";
+        Assert.Contains("https://player.example/embed/abc", StreamCatalog.SpgFrameUrls(spg));
+
+        const string fsp = "window.SPG_A={\"sp\":\"abc\",\"spT\":100}; window.FSP={stream:'/manifests/id/master.txt?verify=x'};";
+        var protectedManifest = StreamCatalog.ProtectedManifestIn(fsp, "https://player.example/video/id");
+        Assert.NotNull(protectedManifest);
+        Assert.Equal("https://player.example/manifests/id/master.txt?verify=x", protectedManifest.Value.Url);
+        Assert.Equal("abc", protectedManifest.Value.Secret);
+        Assert.Equal(100, protectedManifest.Value.Timestamp);
+        Assert.Equal("100.xyz.fb45e22b", StreamCatalog.BuildSpProof("abc", 100, "xyz"));
+
+        const string hls = "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,URI=\"audio/list.txt\"\n#EXTINF:2,\nsegments/one.ts\n";
+        var rewritten = ProtectedStreamProxy.RewriteHlsManifest(hls, "https://cdn.example/path/master.txt", url => "proxy?u=" + Uri.EscapeDataString(url));
+        Assert.Contains("proxy?u=https%3A%2F%2Fcdn.example%2Fpath%2Faudio%2Flist.txt", rewritten);
+        Assert.Contains("proxy?u=https%3A%2F%2Fcdn.example%2Fpath%2Fsegments%2Fone.ts", rewritten);
+    }
+
+    [Fact]
+    public void Common_preroll_hosts_are_never_selected_as_main_media()
+    {
+        Assert.True(StreamCatalog.LooksAd("https://marmorated.pics/preroll/video.mp4"));
+        Assert.True(StreamCatalog.LooksAd("https://shrgo.net/ads/clip.mp4"));
+        Assert.Null(StreamCatalog.PickMediaUrl([
+            "https://marmorated.pics/preroll/video.mp4",
+            "https://shrgo.net/ads/clip.mp4"
+        ]));
+    }
+
+    [Fact]
+    public void Kick_web_player_metadata_and_session_manifest_are_parsed()
+    {
+        const string page =
+            "queryKey:[\\\"WebVideo\\\",\\\"details\\\",104131094,\\\"01a044ef-8900-7c3d-9539-696d32367f14\\\",\\\"getVideo\\\"]";
+        Assert.Equal("104131094", StreamCatalog.KickChannelIdFromPage(page));
+        Assert.Equal(
+            "https://cdn.example/session/master.m3u8",
+            StreamCatalog.KickSessionManifest("{\"manifestUrl\":\"https://cdn.example/session/master.m3u8\"}"));
     }
 
     [Fact]

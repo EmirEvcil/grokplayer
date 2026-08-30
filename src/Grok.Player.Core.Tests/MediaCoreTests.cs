@@ -69,6 +69,12 @@ public sealed class MediaCoreTests
         Assert.Equal(StreamKind.Unknown, StreamProbe.ClassifyManifest(master));
         Assert.Equal("https://x/media.m3u8", StreamProbe.FirstVariantUri(master, "https://x/master.m3u8"));
         Assert.Equal(StreamKind.Vod, StreamProbe.ClassifyUrl("https://cdn/a.mp4"));
+        Assert.Equal(StreamKind.Vod, StreamProbe.ClassifyUrl("https://rumble.com/hls-vod/Sy6DwV_h4aE/playlist.m3u8"));
+        Assert.Equal(StreamKind.Vod, StreamProbe.ClassifyUrl("https://stream.kick.com/3c81249a5ce0/ivs/v1/196233775518/UTurJDh1l4q7/2026/8/27/20/35/LcCjvEpWu9qW/media/hls/master.m3u8"));
+        var kickEvent =
+            "#EXTM3U\n#EXT-X-TARGETDURATION:13\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:12.500,\n0.ts\n";
+        Assert.Equal(StreamKind.Vod, StreamProbe.ClassifyManifest(kickEvent));
+        Assert.Equal(StreamKind.Live, StreamProbe.ClassifyUrl("https://cdn.example/live.m3u8"));
         Assert.Equal(StreamKind.Vod, StreamProbe.Combine(StreamKind.Vod, StreamKind.Live));
         Assert.Equal(StreamKind.Live, StreamProbe.ClassifyManifest("<MPD type=\"dynamic\"></MPD>"));
         Assert.Equal(StreamKind.Vod, StreamProbe.ClassifyManifest("<MPD type=\"static\"></MPD>"));
@@ -182,7 +188,7 @@ public sealed class MediaCoreTests
     {
         var fake = new FakeMpvNative { AutoDurationSeconds = 900 };
         using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
-        host.Open("https://cdn.example/a.m3u8");
+        host.Open("https://cdn.example/live.m3u8");
         host.ProcessPendingEvents();
         host.Seek(TimeSpan.FromSeconds(40));
         host.SeekLive();
@@ -281,6 +287,17 @@ public sealed class MediaCoreTests
         host.ProcessPendingEvents();
         host.Seek(TimeSpan.FromSeconds(40));
         Assert.Equal(["seek", "720", "absolute"], fake.LastCommand());
+    }
+
+    [Fact]
+    public void Rumble_hls_vod_without_kind_does_not_use_the_live_demuxer()
+    {
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        host.Open("https://rumble.com/hls-vod/Sy6DwV_h4aE/playlist.m3u8");
+        Assert.False(host.LiveWindow);
+        Assert.DoesNotContain(fake.Lifecycle, item => item.Contains("live_start_index=-1", StringComparison.Ordinal));
+        Assert.Contains(fake.Lifecycle, item => item.Contains("force-seekable=yes", StringComparison.Ordinal));
     }
 
     [Fact]

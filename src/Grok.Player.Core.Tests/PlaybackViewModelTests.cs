@@ -11,6 +11,33 @@ namespace Grok.Player.Core.Tests;
 public sealed class PlaybackViewModelTests
 {
     [Fact]
+    public void External_short_prerolls_fall_back_to_the_real_player_page()
+    {
+        var dizipal = "https://dizipal2121.com/bolum/test";
+        Assert.Equal(
+            dizipal,
+            PlaybackViewModel.PreferredExternalPath("https://cdn.example/clip.mp4", dizipal, 2));
+
+        var kick = "https://kick.com/channel/videos/01a044ef-8900-7c3d-9539-696d32367f14";
+        Assert.Equal(
+            kick,
+            PlaybackViewModel.PreferredExternalPath("https://cdn.example/advert.mp4", kick, null));
+
+        Assert.Equal(
+            "https://cdn.example/movie.m3u8",
+            PlaybackViewModel.PreferredExternalPath(
+                "https://cdn.example/movie.m3u8",
+                "https://movies.example/watch/full-film",
+                5400));
+
+        var protectedManifest = "https://fastplay.mom/manifests/episode/master.txt?verify=123-proof";
+        var protectedPlayer = "https://fastplay.mom/video/episode";
+        Assert.Equal(
+            protectedPlayer,
+            PlaybackViewModel.PreferredExternalPath(protectedManifest, protectedPlayer, null));
+    }
+
+    [Fact]
     public void Empty_state_before_open()
     {
         using var session = Create(open: false);

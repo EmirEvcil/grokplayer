@@ -1,4 +1,7 @@
+using System.Diagnostics;
 using System.Net.Http;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Grok.Player.Core.Download;
@@ -13,11 +16,18 @@ public static class StreamCatalog
 
     private const string TwitchClientId = "kimne78kx3ncx6brgo4mv6wki5h1ko";
 
-    private static readonly HttpClient Http = new(new HttpClientHandler
+    private static readonly HttpClient Http = CreateHttp();
+
+    private static HttpClient CreateHttp()
     {
-        AutomaticDecompression = System.Net.DecompressionMethods.All
-    })
-    { Timeout = TimeSpan.FromSeconds(10) };
+        var handler = new HttpClientHandler
+        {
+            AutomaticDecompression = System.Net.DecompressionMethods.All,
+            CookieContainer = new System.Net.CookieContainer(),
+            UseCookies = true
+        };
+        return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(12) };
+    }
 
     public static bool LooksResolvable(string? url) =>
         !YouTubeCatalog.IsWatchUrl(url) &&
@@ -80,6 +90,11 @@ public static class StreamCatalog
 
         return ResolvePage(url, audioLang, subLang);
     }
+
+    public static bool LooksKickLivePlayback(string? url) =>
+        !string.IsNullOrWhiteSpace(url) &&
+        url.Contains("live-video.net", StringComparison.OrdinalIgnoreCase) &&
+        url.Contains("channel.", StringComparison.OrdinalIgnoreCase);
 
     public static bool TryReadKick(string? url, out string kind, out string id)
     {
@@ -311,6 +326,21 @@ public static class StreamCatalog
                 uri.AbsolutePath.EndsWith("playlist.txt", StringComparison.OrdinalIgnoreCase));
     }
 
+    public static bool RequiresPlayerPage(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url) || !Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        return Regex.IsMatch(
+                   uri.AbsolutePath,
+                   @"/manifests/[^/]+/master\.(?:txt|m3u8)$",
+                   RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) &&
+               (uri.Query.Contains("verify=", StringComparison.OrdinalIgnoreCase) ||
+                uri.Host.Contains("fastplay.", StringComparison.OrdinalIgnoreCase));
+    }
+
     public static bool IsMediaCdn(string? url)
     {
         if (string.IsNullOrWhiteSpace(url) || !Uri.TryCreate(url, UriKind.Absolute, out var uri))
@@ -328,6 +358,8 @@ public static class StreamCatalog
                host.Contains("ttvnw.net", StringComparison.OrdinalIgnoreCase) ||
                host.Contains("rumble.cloud", StringComparison.OrdinalIgnoreCase) ||
                host.Contains("dmcdn.net", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("playmix.uno", StringComparison.OrdinalIgnoreCase) ||
+               host.Contains("collaborate.pics", StringComparison.OrdinalIgnoreCase) ||
                text.Contains("hls-vod", StringComparison.OrdinalIgnoreCase) ||
                text.Contains("mime_type=video", StringComparison.OrdinalIgnoreCase) ||
                text.Contains("master.txt", StringComparison.OrdinalIgnoreCase) ||
@@ -368,6 +400,12 @@ public static class StreamCatalog
 
     internal static YouTubePlayable? ResolveKickVideo(string id, string pageUrl, string? audioLang, string? subLang)
     {
+        var fromWebPlayer = ResolveKickWebVideo(id, pageUrl, audioLang, subLang);
+        if (fromWebPlayer is not null)
+        {
+            return fromWebPlayer;
+        }
+
         if (LooksUuid(id))
         {
             var byUuid = ParseKickJson(
@@ -440,8 +478,180 @@ public static class StreamCatalog
             return null;
         }
 
-        var fromPage = KickFromPage(pageUrl, id, audioLang, subLang);
-        return fromPage;
+        // A VOD page on a live channel still embeds the live thumbnail. Do
+        // not rebuild that live HLS and open it as this video.
+        return null;
+    }
+
+    private static YouTubePlayable? ResolveKickWebVideo(string id, string pageUrl, string? audioLang, string? subLang)
+    {
+        var html = GetText(pageUrl, ChromeUa, "https://kick.com/");
+        if (string.IsNullOrWhiteSpace(html))
+        {
+            return null;
+        }
+
+        var channelId = KickChannelIdFromPage(html);
+        if (string.IsNullOrWhiteSpace(channelId))
+        {
+            return null;
+        }
+
+        var details = GetJson(
+            "https://web.kick.com/api/v1/channels/" + channelId + "/videos/" + Uri.EscapeDataString(id),
+            pageUrl);
+        var title = KickWebVideoTitle(details) ?? KickTitleFromPage(html) ?? id;
+        var playback = PostKickPlayback(id, pageUrl);
+        if (string.IsNullOrWhiteSpace(playback))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(playback);
+            var media = ReadNested(document.RootElement, "playback_url", "vod");
+            var session = ReadNested(document.RootElement, "playback_url", "vod_session");
+            if (!string.IsNullOrWhiteSpace(session))
+            {
+                var sessionJson = GetJson(session, pageUrl);
+                var sessionMedia = KickSessionManifest(sessionJson);
+                if (!string.IsNullOrWhiteSpace(sessionMedia))
+                {
+                    media = sessionMedia;
+                }
+            }
+            if (string.IsNullOrWhiteSpace(media) || LooksAd(media))
+            {
+                return null;
+            }
+
+            var playable = new YouTubePlayable(
+                "kick|" + id,
+                media,
+                title,
+                StreamKind.Vod,
+                userAgent: ChromeUa,
+                audioLang: audioLang,
+                subLang: subLang,
+                referer: "https://kick.com/");
+            return AttachVodCaptions(playable, subLang);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    internal static string? KickSessionManifest(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return ReadString(document.RootElement, "manifestUrl") ??
+                   ReadString(document.RootElement, "manifest_url");
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    internal static string? KickChannelIdFromPage(string? html)
+    {
+        if (string.IsNullOrWhiteSpace(html))
+        {
+            return null;
+        }
+
+        foreach (var pattern in new[]
+                 {
+                     @"WebVideo[^0-9]{1,100}(\d+)",
+                     @"initialValue[^0-9]{0,80}channelId[^0-9]{0,20}(\d+)",
+                     @"channel\\?""\s*:\s*\{[^{}]{0,400}?id\\?""\s*:\s*(\d+)"
+                 })
+        {
+            var match = Regex.Match(html, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (match.Success)
+            {
+                return match.Groups[1].Value;
+            }
+        }
+
+        return null;
+    }
+
+    private static string? KickWebVideoTitle(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return document.RootElement.TryGetProperty("data", out var data)
+                ? ReadString(data, "title")
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static string? PostKickPlayback(string id, string pageUrl)
+    {
+        var path = Uri.TryCreate(pageUrl, UriKind.Absolute, out var page)
+            ? page.AbsolutePath.TrimStart('/')
+            : "videos/" + id;
+        var body = JsonSerializer.Serialize(new
+        {
+            video_player = new
+            {
+                player = new
+                {
+                    player_name = "web",
+                    player_version = "grokplayer",
+                    player_software = "IVS Player",
+                    player_software_version = "1"
+                },
+                mux_sdk = new { sdk_available = false },
+                pal_sdk = new { sdk_available = false, nonce = "" },
+                datazoom_sdk = new { sdk_available = false, datazoom_sdk_version = "", om_sdk_version = "" },
+                google_ads_sdk = new { sdk_available = false }
+            },
+            video_session = new
+            {
+                page_type = "video",
+                player_remote_played = false,
+                enable_sampling = false,
+                url_path = path,
+                autoplay_behaviour = "auto",
+                play_muted = false,
+                viewer_connection_type = ""
+            },
+            user_session = new
+            {
+                session_id = "",
+                player_device_id = "unknown",
+                browser_lang = "en-US",
+                non_personalised_ads = true,
+                ad_targeting = ""
+            }
+        });
+        return PostJson(
+            "https://web.kick.com/api/v1/stream/" + Uri.EscapeDataString(id) + "/playback",
+            body,
+            pageUrl,
+            null,
+            webPlatform: true);
     }
 
     internal static YouTubePlayable? KickFromPage(string pageUrl, string id, string? audioLang, string? subLang)
@@ -625,10 +835,61 @@ public static class StreamCatalog
         return AttachVodCaptions(playable, subLang);
     }
 
-    internal static YouTubePlayable ResolveDirect(string url, string? audioLang, string? subLang)
+    private static StreamKind ClassifyDirectPlaylist(string url)
     {
+        var fromUrl = StreamProbe.ClassifyUrl(url);
+        if (fromUrl != StreamKind.Unknown)
+        {
+            return fromUrl;
+        }
+
+        var body = GetText(url, ChromeUa, PageOrigin(url)) ?? "";
+        var fromManifest = StreamProbe.ClassifyManifest(body);
+        if (fromManifest != StreamKind.Unknown)
+        {
+            return fromManifest;
+        }
+
+        if (HlsPlaylist.IsMaster(body))
+        {
+            var variant = StreamProbe.FirstVariantUri(body, url);
+            if (!string.IsNullOrWhiteSpace(variant))
+            {
+                var inner = StreamProbe.ClassifyManifest(GetText(variant, ChromeUa, PageOrigin(url)) ?? "");
+                if (inner != StreamKind.Unknown)
+                {
+                    return inner;
+                }
+            }
+        }
+
+        return StreamKind.Vod;
+    }
+
+    internal static YouTubePlayable? ResolveDirect(string url, string? audioLang, string? subLang)
+    {
+        if (LooksImagePlaylistUrl(url))
+        {
+            var sibling = SiblingPlaylistUrl(url);
+            return string.IsNullOrWhiteSpace(sibling) || sibling == url
+                ? null
+                : ResolveDirect(sibling, audioLang, subLang);
+        }
+
         var ext = StreamProbe.Extension(url);
-        var kind = ext is ".m3u8" or ".m3u" or ".mpd" ? StreamKind.Unknown : StreamKind.Vod;
+        var kind = ext is ".m3u8" or ".m3u" or ".mpd" or ".txt"
+            ? ClassifyDirectPlaylist(url)
+            : StreamKind.Vod;
+        if (ext is ".m3u8" or ".m3u" or ".mpd" or ".txt")
+        {
+            var body = GetText(url, ChromeUa, PageOrigin(url)) ?? "";
+            if (string.IsNullOrWhiteSpace(body) ||
+                body.Contains("<html", StringComparison.OrdinalIgnoreCase) ||
+                IsImagePlaylist(body))
+            {
+                return null;
+            }
+        }
         var playable = new YouTubePlayable(
             "direct|" + Math.Abs(url.GetHashCode(StringComparison.Ordinal)).ToString("x", System.Globalization.CultureInfo.InvariantCulture),
             url,
@@ -643,6 +904,17 @@ public static class StreamCatalog
 
     internal static YouTubePlayable? ResolveRumble(string id, string pageUrl, string? audioLang, string? subLang)
     {
+        var embedId = RumbleEmbedId(pageUrl);
+        if (string.IsNullOrWhiteSpace(embedId))
+        {
+            embedId = RumbleEmbedIdFromHtml(GetText(pageUrl, ChromeUa, "https://rumble.com/"));
+        }
+
+        if (!string.IsNullOrWhiteSpace(embedId))
+        {
+            id = embedId;
+        }
+
         var json = GetJson(
             "https://rumble.com/embedJS/u3/?request=video&ver=2&v=" + Uri.EscapeDataString(id),
             pageUrl);
@@ -656,21 +928,14 @@ public static class StreamCatalog
 
         if (string.IsNullOrWhiteSpace(json) || !json.TrimStart().StartsWith('{'))
         {
-            var embedId = RumbleEmbedId(pageUrl);
-            if (!string.IsNullOrWhiteSpace(embedId) &&
-                !embedId.Equals(id, StringComparison.OrdinalIgnoreCase))
-            {
-                json = GetJson(
-                    "https://rumble.com/embedJS/u3/?request=video&ver=2&v=" + Uri.EscapeDataString(embedId),
-                    pageUrl);
-            }
+            json = CurlText(
+                "https://rumble.com/embedJS/u3/?request=video&ver=2&v=" + Uri.EscapeDataString(id),
+                pageUrl);
+        }
 
-            if (string.IsNullOrWhiteSpace(json) || !json.TrimStart().StartsWith('{'))
-            {
-                return null;
-            }
-
-            id = string.IsNullOrWhiteSpace(embedId) ? id : embedId;
+        if (string.IsNullOrWhiteSpace(json) || !json.TrimStart().StartsWith('{'))
+        {
+            return RumbleFromHls(id, pageUrl, audioLang, subLang);
         }
 
         try
@@ -725,35 +990,84 @@ public static class StreamCatalog
             "https://rumble.com/");
         if (string.IsNullOrWhiteSpace(json) || !json.TrimStart().StartsWith('{'))
         {
+            json = CurlText(
+                "https://rumble.com/api/Media/oembed.json?url=" + Uri.EscapeDataString(pageUrl),
+                "https://rumble.com/");
+        }
+
+        if (string.IsNullOrWhiteSpace(json) || !json.TrimStart().StartsWith('{'))
+        {
             return null;
         }
 
         try
         {
             using var document = JsonDocument.Parse(json);
-            var html = ReadString(document.RootElement, "html");
-            if (string.IsNullOrWhiteSpace(html))
-            {
-                return null;
-            }
-
-            var match = Regex.Match(
-                html,
-                @"rumble\.com/embed/([^/?""']+)",
-                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-            if (!match.Success)
-            {
-                return null;
-            }
-
-            var embed = match.Groups[1].Value.Trim('/');
-            var dot = embed.LastIndexOf('.');
-            return dot >= 0 ? embed[(dot + 1)..] : embed;
+            return RumbleEmbedIdFromHtml(ReadString(document.RootElement, "html"));
         }
         catch (Exception)
         {
             return null;
         }
+    }
+
+    public static string? RumbleEmbedIdFromHtml(string? html)
+    {
+        if (string.IsNullOrWhiteSpace(html))
+        {
+            return null;
+        }
+
+        var match = Regex.Match(
+            html,
+            @"rumble\.com/embed/([^/?""']+)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (!match.Success)
+        {
+            return null;
+        }
+
+        var embed = match.Groups[1].Value.Trim('/');
+        var dot = embed.LastIndexOf('.');
+        return dot >= 0 ? embed[(dot + 1)..] : embed;
+    }
+
+    private static YouTubePlayable? RumbleFromHls(string id, string pageUrl, string? audioLang, string? subLang)
+    {
+        foreach (var media in RumbleHlsCandidates(id))
+        {
+            if (!IsFetchableMedia(media, "https://rumble.com/"))
+            {
+                continue;
+            }
+
+            return new YouTubePlayable(
+                "rumble|" + id,
+                media,
+                id,
+                StreamKind.Vod,
+                userAgent: ChromeUa,
+                audioLang: audioLang,
+                subLang: subLang,
+                referer: "https://rumble.com/");
+        }
+
+        var html = GetText(pageUrl, ChromeUa, "https://rumble.com/");
+        var picked = PickMediaUrl(MediaUrlsIn(html));
+        if (string.IsNullOrWhiteSpace(picked) || !IsFetchableMedia(picked, pageUrl))
+        {
+            return null;
+        }
+
+        return new YouTubePlayable(
+            "rumble|" + id,
+            picked,
+            HtmlTitle(html) ?? id,
+            StreamKind.Vod,
+            userAgent: ChromeUa,
+            audioLang: audioLang,
+            subLang: subLang,
+            referer: "https://rumble.com/");
     }
 
     public static IReadOnlyList<string> RumbleHlsCandidates(string id)
@@ -843,22 +1157,75 @@ public static class StreamCatalog
             return null;
         }
 
-        var html = GetText(url, ChromeUa, referer ?? url);
+        var html = GetText(url, ChromeUa, referer ?? url) ?? CurlText(url, referer ?? url);
         if (string.IsNullOrWhiteSpace(html))
         {
             return null;
         }
 
-        var media = PickMediaUrl(MediaUrlsIn(html));
-        var strong = !string.IsNullOrWhiteSpace(media) && MediaScore(media) >= 3000;
-        if (!strong && depth < 2)
+        if (LooksMediaManifest(html))
         {
-            foreach (var embed in PlayerEmbedsIn(html, url))
+            return new YouTubePlayable(
+                "manifest|" + Math.Abs(url.GetHashCode(StringComparison.Ordinal)).ToString("x", System.Globalization.CultureInfo.InvariantCulture),
+                url,
+                UrlSanitizer.DisplayName(url),
+                StreamKind.Vod,
+                userAgent: ChromeUa,
+                audioLang: audioLang,
+                subLang: subLang,
+                referer: referer ?? url,
+                formatHint: html.AsSpan().TrimStart().StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase) ? "hls" : "dash");
+        }
+
+        var protectedManifest = ProtectedManifestIn(html, url);
+        if (protectedManifest is not null)
+        {
+            return new YouTubePlayable(
+                "protected-manifest|" + Math.Abs(url.GetHashCode(StringComparison.Ordinal)).ToString("x", System.Globalization.CultureInfo.InvariantCulture),
+                ProtectedStreamProxy.Register(
+                    protectedManifest.Value.Url,
+                    url,
+                    protectedManifest.Value.Secret,
+                    protectedManifest.Value.Timestamp),
+                HtmlTitle(html) ?? UrlSanitizer.DisplayName(url),
+                StreamKind.Vod,
+                userAgent: ChromeUa,
+                audioLang: audioLang,
+                subLang: subLang,
+                referer: url,
+                formatHint: "hls");
+        }
+
+        var documents = PlayerDocuments(html);
+        string? media = null;
+        foreach (var document in documents)
+        {
+            media = PickMediaUrl(MediaUrlsIn(document));
+            if (!IsFetchableMedia(media, url))
             {
-                var nested = ResolvePage(embed, audioLang, subLang, depth + 1, url);
-                if (nested is not null)
+                media = null;
+            }
+
+            media ??= FirePlayerMedia(document, url, referer ?? url);
+            if (!string.IsNullOrWhiteSpace(media))
+            {
+                break;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(media) && depth < 4)
+        {
+            foreach (var document in documents)
+            {
+                var embeds = PlayerEmbedsIn(document, url)
+                    .Concat(AjaxPlayerEmbeds(document, url));
+                foreach (var embed in embeds.Distinct(StringComparer.Ordinal))
                 {
-                    return nested;
+                    var nested = ResolvePage(embed, audioLang, subLang, depth + 1, url);
+                    if (nested is not null)
+                    {
+                        return nested;
+                    }
                 }
             }
         }
@@ -877,6 +1244,168 @@ public static class StreamCatalog
             audioLang: audioLang,
             subLang: subLang,
             referer: url);
+    }
+
+    private static IReadOnlyList<string> PlayerDocuments(string html)
+    {
+        var documents = new List<string> { html };
+        for (var cursor = 0; cursor < documents.Count && cursor < 12; cursor++)
+        {
+            foreach (var unpacked in UnpackDeanEdwards(documents[cursor]))
+            {
+                if (!documents.Contains(unpacked, StringComparer.Ordinal))
+                {
+                    documents.Add(unpacked);
+                }
+            }
+
+            foreach (var decrypted in DecryptCryptoJsDocuments(documents[cursor]))
+            {
+                if (!documents.Contains(decrypted, StringComparer.Ordinal))
+                {
+                    documents.Add(decrypted);
+                }
+            }
+        }
+
+        return documents;
+    }
+
+    internal static IReadOnlyList<string> DecryptCryptoJsDocuments(string? html)
+    {
+        var documents = new List<string>();
+        if (string.IsNullOrWhiteSpace(html))
+        {
+            return documents;
+        }
+
+        foreach (Match match in Regex.Matches(
+                     html,
+                     @"CryptoJS\.AES\.decrypt\(\s*(?:""(?<cipher>[^""]+)""|'(?<cipher>[^']+)')\s*,\s*(?:""(?<pass>[^""]*)""|'(?<pass>[^']*)')",
+                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            try
+            {
+                var encrypted = Convert.FromBase64String(JsStringUnescape(match.Groups["cipher"].Value));
+                if (encrypted.Length <= 16 || !encrypted.AsSpan(0, 8).SequenceEqual("Salted__"u8))
+                {
+                    continue;
+                }
+
+                var salt = encrypted.AsSpan(8, 8).ToArray();
+                var password = Encoding.UTF8.GetBytes(JsStringUnescape(match.Groups["pass"].Value));
+                var material = new List<byte>(48);
+                byte[] previous = [];
+                while (material.Count < 48)
+                {
+                    var input = new byte[previous.Length + password.Length + salt.Length];
+                    Buffer.BlockCopy(previous, 0, input, 0, previous.Length);
+                    Buffer.BlockCopy(password, 0, input, previous.Length, password.Length);
+                    Buffer.BlockCopy(salt, 0, input, previous.Length + password.Length, salt.Length);
+                    previous = MD5.HashData(input);
+                    material.AddRange(previous);
+                }
+
+                using var aes = Aes.Create();
+                aes.KeySize = 256;
+                aes.BlockSize = 128;
+                aes.Mode = CipherMode.CBC;
+                aes.Padding = PaddingMode.PKCS7;
+                aes.Key = material.Take(32).ToArray();
+                aes.IV = material.Skip(32).Take(16).ToArray();
+                using var decryptor = aes.CreateDecryptor();
+                var plain = decryptor.TransformFinalBlock(encrypted, 16, encrypted.Length - 16);
+                var document = Encoding.UTF8.GetString(plain);
+                if (!string.IsNullOrWhiteSpace(document))
+                {
+                    documents.Add(document);
+                }
+            }
+            catch (Exception error) when (error is FormatException or CryptographicException)
+            {
+            }
+        }
+
+        return documents;
+    }
+
+    private static string? FirePlayerMedia(string html, string pageUrl, string outerReferer)
+    {
+        var texts = new List<string> { html };
+        texts.AddRange(UnpackDeanEdwards(html));
+        string? id = null;
+        foreach (var text in texts)
+        {
+            var match = Regex.Match(
+                text,
+                @"\bFirePlayer\(\s*[""']([A-Za-z0-9_-]{16,})[""']",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (match.Success)
+            {
+                id = match.Groups[1].Value;
+                break;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(id) || !Uri.TryCreate(pageUrl, UriKind.Absolute, out var page))
+        {
+            return null;
+        }
+
+        var endpoint = new Uri(
+            page,
+            "/player/index.php?data=" + Uri.EscapeDataString(id) + "&do=getVideo").AbsoluteUri;
+        var json = PostForm(endpoint, new Dictionary<string, string>
+        {
+            ["hash"] = id,
+            ["r"] = outerReferer
+        }, pageUrl);
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            var secured = ReadString(root, "securedLink") ?? ReadString(root, "secured_link");
+            var source = ReadString(root, "videoSource") ?? ReadString(root, "video_source");
+            return PickMediaUrl(new[] { secured, source }.Where(value => !string.IsNullOrWhiteSpace(value))!);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static bool IsFetchableMedia(string? media, string referer)
+    {
+        if (string.IsNullOrWhiteSpace(media) || LooksImagePlaylistUrl(media) || LooksAd(media))
+        {
+            return false;
+        }
+
+        if (Uri.TryCreate(media, UriKind.Absolute, out var mediaUri) &&
+            Uri.TryCreate(referer, UriKind.Absolute, out var pageUri) &&
+            string.Equals(
+                mediaUri.GetLeftPart(UriPartial.Path).TrimEnd('/'),
+                pageUri.GetLeftPart(UriPartial.Path).TrimEnd('/'),
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var ext = StreamProbe.Extension(media);
+        if (ext is not (".m3u8" or ".m3u" or ".mpd" or ".txt"))
+        {
+            return true;
+        }
+
+        var body = GetText(media, ChromeUa, referer);
+        return !string.IsNullOrWhiteSpace(body) &&
+               !body.Contains("<html", StringComparison.OrdinalIgnoreCase) &&
+               !IsImagePlaylist(body);
     }
 
     public static IReadOnlyList<string> MediaUrlsIn(string? text)
@@ -994,7 +1523,7 @@ public static class StreamCatalog
             }
 
             var mark = uri.AbsoluteUri + " " + tag.Value;
-            if (!Regex.IsMatch(mark, @"embed|player|video|rapidrame|/e/|watch", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+            if (!Regex.IsMatch(mark, @"embed|player|video|vod|rapidvid|rapidrame|/e/|watch", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
             {
                 continue;
             }
@@ -1011,7 +1540,282 @@ public static class StreamCatalog
             }
         }
 
+        foreach (Match attribute in Regex.Matches(
+                     html,
+                     @"data-(?:cfg|config|player)\s*=\s*[""']([^""']+)[""']",
+                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            var encoded = System.Net.WebUtility.HtmlDecode(attribute.Groups[1].Value).Trim();
+            try
+            {
+                var decoded = System.Text.Encoding.UTF8.GetString(FromBase64(encoded));
+                foreach (Match url in Regex.Matches(decoded, @"https?://[^""'\s<>]+", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                {
+                    var href = url.Value.Replace("\\/", "/", StringComparison.Ordinal);
+                    if (!LooksAd(href) &&
+                        !LooksImagePlaylistUrl(href) &&
+                        !IsDirectMedia(href) &&
+                        Uri.TryCreate(href, UriKind.Absolute, out _) &&
+                        !list.Contains(href, StringComparer.Ordinal))
+                    {
+                        list.Add(href);
+                    }
+                }
+            }
+            catch (FormatException)
+            {
+            }
+        }
+
+        foreach (Match source in Regex.Matches(
+                     html,
+                     @"\b(?:file|source|src)\s*:\s*[""'](https?://[^""']+)[""']",
+                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            var href = System.Net.WebUtility.HtmlDecode(source.Groups[1].Value)
+                .Replace("\\/", "/", StringComparison.Ordinal);
+            if (!LooksAd(href) &&
+                !LooksImagePlaylistUrl(href) &&
+                !IsDirectMedia(href) &&
+                Uri.TryCreate(href, UriKind.Absolute, out _) &&
+                !list.Contains(href, StringComparer.Ordinal))
+            {
+                list.Add(href);
+            }
+        }
+
+        foreach (var frame in SpgFrameUrls(html))
+        {
+            if (!LooksAd(frame) && !list.Contains(frame, StringComparer.Ordinal))
+            {
+                list.Add(frame);
+            }
+        }
+
         return list;
+    }
+
+    internal static IReadOnlyList<string> SpgFrameUrls(string? html)
+    {
+        var urls = new List<string>();
+        if (string.IsNullOrWhiteSpace(html))
+        {
+            return urls;
+        }
+
+        foreach (Match match in Regex.Matches(
+                     html,
+                     @"\bSPG\.cerceve\(\s*[""'][^""']+[""']\s*,\s*[""'](?<data>[^""']+)[""']\s*,\s*[""'](?<key>[^""']+)[""']",
+                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            try
+            {
+                var encrypted = FromBase64(JsStringUnescape(match.Groups["data"].Value));
+                var key = FromBase64(JsStringUnescape(match.Groups["key"].Value));
+                if (key.Length == 0)
+                {
+                    continue;
+                }
+
+                var plain = new byte[encrypted.Length];
+                for (var i = 0; i < encrypted.Length; i++)
+                {
+                    plain[i] = (byte)(encrypted[i] ^ key[i % key.Length]);
+                }
+
+                var frame = Encoding.UTF8.GetString(plain).Split('|')[0];
+                if (Uri.TryCreate(frame, UriKind.Absolute, out var uri) &&
+                    uri.Scheme is "http" or "https" &&
+                    !urls.Contains(uri.AbsoluteUri, StringComparer.Ordinal))
+                {
+                    urls.Add(uri.AbsoluteUri);
+                }
+            }
+            catch (FormatException)
+            {
+            }
+        }
+
+        return urls;
+    }
+
+    internal static (string Url, string Secret, long Timestamp)? ProtectedManifestIn(string? html, string pageUrl)
+    {
+        if (string.IsNullOrWhiteSpace(html) || !Uri.TryCreate(pageUrl, UriKind.Absolute, out var page))
+        {
+            return null;
+        }
+
+        var guard = Regex.Match(
+            html,
+            @"\bwindow\.SPG_A\s*=\s*\{(?<body>[^}]+)\}",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant);
+        var stream = Regex.Match(
+            html,
+            @"\bstream\s*:\s*[""']([^""']+)[""']",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (!guard.Success || !stream.Success)
+        {
+            return null;
+        }
+
+        static string GuardField(string body, string name)
+        {
+            var value = Regex.Match(
+                body,
+                @"[""']?" + Regex.Escape(name) + @"[""']?\s*:\s*[""']([^""']*)[""']",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            return value.Success ? JsStringUnescape(value.Groups[1].Value) : "";
+        }
+
+        var body = guard.Groups["body"].Value;
+        var secret = GuardField(body, "sp");
+        var time = Regex.Match(
+            body,
+            @"[""']?spT[""']?\s*:\s*(\d+)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant).Groups[1].Value;
+        if (string.IsNullOrWhiteSpace(secret) || !long.TryParse(time, out var timestamp))
+        {
+            return null;
+        }
+
+        var href = JsStringUnescape(stream.Groups[1].Value);
+        if (!Uri.TryCreate(href, UriKind.Absolute, out var manifest))
+        {
+            manifest = new Uri(page, href);
+        }
+
+        return (manifest.AbsoluteUri, secret, timestamp);
+    }
+
+    internal static string BuildSpProof(string secret, long timestamp, string random)
+    {
+        var input = secret + "|" + timestamp.ToString(System.Globalization.CultureInfo.InvariantCulture) + "|" + random;
+        var hash = 2166136261u;
+        foreach (var symbol in input)
+        {
+            hash ^= symbol;
+            hash = unchecked(hash * 16777619u);
+        }
+
+        return timestamp.ToString(System.Globalization.CultureInfo.InvariantCulture) + "." + random + "." + hash.ToString("x", System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    internal static (string Endpoint, string Nonce, string PostId, IReadOnlyList<string> Players)? WordPressAjaxPlayerFields(
+        string? html,
+        string pageUrl)
+    {
+        if (string.IsNullOrWhiteSpace(html) || !Uri.TryCreate(pageUrl, UriKind.Absolute, out var page))
+        {
+            return null;
+        }
+
+        var ajax = Regex.Match(
+            html,
+            @"\bvideoAjax\s*=\s*\{(?<body>[^}]+)\}",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline | RegexOptions.CultureInvariant);
+        if (!ajax.Success ||
+            !Regex.IsMatch(html, @"\baction\s*:\s*[""']get_video_url[""']", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            return null;
+        }
+
+        static string Field(string body, string name)
+        {
+            var match = Regex.Match(
+                body,
+                @"\b" + Regex.Escape(name) + @"\s*:\s*[""']([^""']+)[""']",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            return match.Success ? JsStringUnescape(match.Groups[1].Value) : "";
+        }
+
+        var endpoint = Field(ajax.Groups["body"].Value, "ajaxurl");
+        var nonce = Field(ajax.Groups["body"].Value, "nonce");
+        var post = Regex.Match(
+            html,
+            @"\bdata-post-id\s*=\s*[""']([^""']+)[""']",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant).Groups[1].Value;
+        var players = Regex.Matches(
+                html,
+                @"\bdata-player-name\s*=\s*[""']([^""']+)[""']",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)
+            .Select(match => System.Net.WebUtility.HtmlDecode(match.Groups[1].Value).Trim())
+            .Where(value => value.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (string.IsNullOrWhiteSpace(endpoint) || string.IsNullOrWhiteSpace(nonce) ||
+            string.IsNullOrWhiteSpace(post) || players.Length == 0)
+        {
+            return null;
+        }
+
+        if (endpoint.StartsWith('/'))
+        {
+            endpoint = page.GetLeftPart(UriPartial.Authority) + endpoint;
+        }
+
+        return Uri.TryCreate(endpoint, UriKind.Absolute, out var endpointUri)
+            ? (endpointUri.AbsoluteUri, nonce, post, players)
+            : null;
+    }
+
+    internal static IReadOnlyList<string> AjaxPlayerEmbeds(string html, string pageUrl)
+    {
+        var fields = WordPressAjaxPlayerFields(html, pageUrl);
+        if (fields is null)
+        {
+            return [];
+        }
+
+        var embeds = new List<string>();
+        foreach (var player in fields.Value.Players.Take(8))
+        {
+            var json = PostForm(fields.Value.Endpoint, new Dictionary<string, string>
+            {
+                ["action"] = "get_video_url",
+                ["nonce"] = fields.Value.Nonce,
+                ["post_id"] = fields.Value.PostId,
+                ["player_name"] = player,
+                ["part_key"] = ""
+            }, pageUrl);
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                continue;
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(json);
+                if (document.RootElement.TryGetProperty("data", out var data) &&
+                    data.ValueKind == JsonValueKind.Object &&
+                    data.TryGetProperty("url", out var value) &&
+                    value.ValueKind == JsonValueKind.String &&
+                    Uri.TryCreate(value.GetString(), UriKind.Absolute, out var embed) &&
+                    !LooksAd(embed.AbsoluteUri))
+                {
+                    embeds.Add(embed.AbsoluteUri);
+                }
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        return embeds;
+    }
+
+    internal static bool LooksMediaManifest(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var trimmed = text.AsSpan().TrimStart();
+        return trimmed.StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase) ||
+               (trimmed.StartsWith("<?xml", StringComparison.OrdinalIgnoreCase) &&
+                text.Contains("<MPD", StringComparison.OrdinalIgnoreCase));
     }
 
     internal static IReadOnlyList<string> PackedPlayerUrls(string? html)
@@ -1042,7 +1846,138 @@ public static class StreamCatalog
             }
         }
 
+        foreach (Match call in Regex.Matches(
+                     html,
+                     @"\bav\(\s*[""']([^""']+)[""']\s*\)",
+                     RegexOptions.CultureInvariant))
+        {
+            var decoded = DecodeRapidPlayerUrl(call.Groups[1].Value);
+            if (!string.IsNullOrWhiteSpace(decoded) &&
+                decoded.StartsWith("http", StringComparison.OrdinalIgnoreCase) &&
+                !list.Contains(decoded, StringComparer.Ordinal))
+            {
+                list.Add(decoded);
+            }
+        }
+
+        foreach (var unpacked in UnpackDeanEdwards(html))
+        {
+            foreach (var url in MediaUrlsIn(unpacked))
+            {
+                if (!list.Contains(url, StringComparer.Ordinal))
+                {
+                    list.Add(url);
+                }
+            }
+        }
+
         return list;
+    }
+
+    internal static string? DecodeRapidPlayerUrl(string encoded)
+    {
+        try
+        {
+            var bytes = FromBase64(ReverseAscii(encoded));
+            var inner = new byte[bytes.Length];
+            ReadOnlySpan<byte> shift = [1, 3, 2];
+            for (var i = 0; i < bytes.Length; i++)
+            {
+                inner[i] = (byte)(bytes[i] - shift[i % shift.Length]);
+            }
+
+            return System.Text.Encoding.UTF8.GetString(FromBase64(Latin1(inner)));
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+    }
+
+    internal static IReadOnlyList<string> UnpackDeanEdwards(string? html)
+    {
+        var output = new List<string>();
+        if (string.IsNullOrWhiteSpace(html))
+        {
+            return output;
+        }
+
+        foreach (Match match in Regex.Matches(
+                     html,
+                     @"eval\(function\(p,a,c,k,e,d\).*?\}\(\s*'((?:\\.|[^'])*)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'((?:\\.|[^'])*)'\.split\('\|'\)",
+                     RegexOptions.Singleline | RegexOptions.CultureInvariant))
+        {
+            if (!int.TryParse(match.Groups[2].Value, out var radix) ||
+                !int.TryParse(match.Groups[3].Value, out var count) ||
+                radix is < 2 or > 62)
+            {
+                continue;
+            }
+
+            var payload = JsStringUnescape(match.Groups[1].Value);
+            var symbols = JsStringUnescape(match.Groups[4].Value).Split('|');
+            for (var i = Math.Min(count, symbols.Length) - 1; i >= 0; i--)
+            {
+                if (symbols[i].Length == 0)
+                {
+                    continue;
+                }
+
+                payload = Regex.Replace(
+                    payload,
+                    @"\b" + Regex.Escape(ToRadix(i, radix)) + @"\b",
+                    _ => symbols[i],
+                    RegexOptions.CultureInvariant);
+            }
+
+            output.Add(payload);
+        }
+
+        return output;
+    }
+
+    private static string ToRadix(int value, int radix)
+    {
+        const string digits = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        if (value == 0)
+        {
+            return "0";
+        }
+
+        var result = "";
+        while (value > 0)
+        {
+            result = digits[value % radix] + result;
+            value /= radix;
+        }
+
+        return result;
+    }
+
+    private static string JsStringUnescape(string value)
+    {
+        return Regex.Replace(value, @"\\(?:u([0-9a-fA-F]{4})|x([0-9a-fA-F]{2})|(.))", match =>
+        {
+            if (match.Groups[1].Success)
+            {
+                return ((char)Convert.ToInt32(match.Groups[1].Value, 16)).ToString();
+            }
+
+            if (match.Groups[2].Success)
+            {
+                return ((char)Convert.ToInt32(match.Groups[2].Value, 16)).ToString();
+            }
+
+            return match.Groups[3].Value switch
+            {
+                "n" => "\n",
+                "r" => "\r",
+                "t" => "\t",
+                "b" => "\b",
+                "f" => "\f",
+                var escaped => escaped
+            };
+        }, RegexOptions.CultureInvariant);
     }
 
     internal static string? DecodePackedPlayerUrl(IReadOnlyList<string> parts)
@@ -1131,7 +2066,18 @@ public static class StreamCatalog
             }
         }
 
-        return score <= 0 ? null : best;
+        return score < 0 ? null : best;
+    }
+
+    public static string? SiblingPlaylistUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url) ||
+            !Regex.IsMatch(url, @"/txt/master\.txt", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            return null;
+        }
+
+        return Regex.Replace(url, @"/txt/master\.txt", "/master.txt", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 
     public static bool LooksImagePlaylistUrl(string? url) =>
@@ -1227,14 +2173,15 @@ public static class StreamCatalog
         !string.IsNullOrWhiteSpace(url) &&
         Regex.IsMatch(
             url,
-            @"doubleclick|googlesyndication|imasdk|adsystem|/ads?/|preroll|vast|spotx|pubads|adnxs|advert|promo|/rekla/|reklam|xpartner|dmxleo",
+            @"doubleclick|googlesyndication|imasdk|adsystem|/ads?/|preroll|vast|spotx|pubads|adnxs|advert|promo|/rekla/|reklam|xpartner|dmxleo|marmorated\.pics|shrgo\.net|clips\.kick|/clips?/|bumper",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     public static YouTubePlayable AttachVodCaptions(YouTubePlayable playable, string? language)
     {
         if (playable.Kind == StreamKind.Live ||
             !string.IsNullOrWhiteSpace(playable.CaptionUrl) ||
-            MediaLanguage.IsOff(language))
+            MediaLanguage.IsOff(language) ||
+            string.IsNullOrWhiteSpace(MediaLanguage.Normalize(language)))
         {
             return playable;
         }
@@ -1346,9 +2293,19 @@ public static class StreamCatalog
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
             request.Headers.TryAddWithoutValidation("User-Agent", ChromeUa);
             request.Headers.TryAddWithoutValidation("Referer", referer);
-            request.Headers.TryAddWithoutValidation("Origin", referer.TrimEnd('/'));
+            var origin = PageOrigin(referer)?.TrimEnd('/');
+            if (!string.IsNullOrWhiteSpace(origin))
+            {
+                request.Headers.TryAddWithoutValidation("Origin", origin);
+            }
             request.Headers.TryAddWithoutValidation("Accept", "application/json,text/plain,*/*");
             request.Headers.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
+            request.Headers.TryAddWithoutValidation("sec-ch-ua", "\"Google Chrome\";v=\"131\", \"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\"");
+            request.Headers.TryAddWithoutValidation("sec-ch-ua-mobile", "?0");
+            request.Headers.TryAddWithoutValidation("sec-ch-ua-platform", "\"Windows\"");
+            request.Headers.TryAddWithoutValidation("Sec-Fetch-Dest", "empty");
+            request.Headers.TryAddWithoutValidation("Sec-Fetch-Mode", "cors");
+            request.Headers.TryAddWithoutValidation("Sec-Fetch-Site", "same-origin");
             using var response = Http.Send(request);
             return response.IsSuccessStatusCode
                 ? response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
@@ -1384,20 +2341,91 @@ public static class StreamCatalog
         }
     }
 
-    private static string? PostJson(string url, string body, string referer, string? clientId)
+    private static string? CurlText(string url, string? referer)
+    {
+        try
+        {
+            var args = "-sS -L --max-time 12 -A \"" + ChromeUa + "\"";
+            if (!string.IsNullOrWhiteSpace(referer))
+            {
+                args += " -H \"Referer: " + referer.Replace("\"", "", StringComparison.Ordinal) + "\"";
+            }
+
+            args += " \"" + url + "\"";
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = "curl.exe",
+                Arguments = args,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            });
+            if (process is null)
+            {
+                return null;
+            }
+
+            var text = process.StandardOutput.ReadToEnd();
+            if (!process.WaitForExit(13000))
+            {
+                try { process.Kill(true); } catch (Exception) { }
+                return null;
+            }
+
+            return string.IsNullOrWhiteSpace(text) ? null : text;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static string? PostJson(string url, string body, string referer, string? clientId, bool webPlatform = false)
     {
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Post, url);
             request.Headers.TryAddWithoutValidation("User-Agent", ChromeUa);
             request.Headers.TryAddWithoutValidation("Referer", referer);
-            request.Headers.TryAddWithoutValidation("Origin", referer.TrimEnd('/'));
+            var origin = PageOrigin(referer)?.TrimEnd('/');
+            if (!string.IsNullOrWhiteSpace(origin))
+            {
+                request.Headers.TryAddWithoutValidation("Origin", origin);
+            }
             if (!string.IsNullOrWhiteSpace(clientId))
             {
                 request.Headers.TryAddWithoutValidation("Client-Id", clientId);
             }
+            if (webPlatform)
+            {
+                request.Headers.TryAddWithoutValidation("x-app-platform", "web");
+                request.Headers.TryAddWithoutValidation("Accept", "application/json");
+            }
 
             request.Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json");
+            using var response = Http.Send(request);
+            return response.IsSuccessStatusCode
+                ? response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static string? PostForm(string url, IReadOnlyDictionary<string, string> values, string referer)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, url);
+            request.Headers.TryAddWithoutValidation("User-Agent", ChromeUa);
+            request.Headers.TryAddWithoutValidation("Referer", referer);
+            request.Headers.TryAddWithoutValidation("Origin", PageOrigin(referer)?.TrimEnd('/'));
+            request.Headers.TryAddWithoutValidation("Accept", "application/json, text/javascript, */*; q=0.01");
+            request.Headers.TryAddWithoutValidation("X-Requested-With", "XMLHttpRequest");
+            request.Content = new FormUrlEncodedContent(values);
             using var response = Http.Send(request);
             return response.IsSuccessStatusCode
                 ? response.Content.ReadAsStringAsync().GetAwaiter().GetResult()

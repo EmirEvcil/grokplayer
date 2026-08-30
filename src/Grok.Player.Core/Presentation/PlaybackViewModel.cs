@@ -661,6 +661,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         string? captionUrl = null;
         string? referer = null;
         string? soundtrack = null;
+        double? externalDuration = null;
         var protocolKind = StreamKind.Unknown;
         if (ExternalOpen.TryParse(trimmed, out var external))
         {
@@ -687,10 +688,20 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             captionUrl ??= external.CaptionUrl;
             referer ??= external.Referer;
             soundtrack = external.Soundtrack;
+            externalDuration = external.DurationSeconds;
             if (external.DurationSeconds is > 0)
             {
                 _hintDuration = external.DurationSeconds;
             }
+        }
+
+        // Browser players often expose a short preroll as the current media
+        // while retaining the real player page as the referrer. Resolve that
+        // page instead. Kick VOD pages always use the official playback flow,
+        // even when the extension happened to observe an ad/live request.
+        if (protocol)
+        {
+            trimmed = PreferredExternalPath(trimmed, referer, externalDuration);
         }
 
         if (height > 0)
@@ -726,6 +737,10 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
                         _subLang = fromUrl;
                     }
                 }
+                else
+                {
+                    _subLang = null;
+                }
             }
 
             StreamSubtitles.LastAudio = _audioLang;
@@ -758,7 +773,8 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
 
         EnsureStreamLanguages();
 
-        _pendingStart = YouTubeCatalog.ReadStartSeconds(trimmed);
+        _pendingStart = YouTubeCatalog.ReadStartSeconds(trimmed) ??
+                        YouTubeCatalog.ReadStartSeconds(referer);
         if (YouTubeCatalog.TryReadVideoId(trimmed, out var videoId))
         {
             trimmed = "https://www.youtube.com/watch?v=" + videoId;
@@ -830,6 +846,19 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             ? ActionFeedback.StreamAdded(title ?? UrlSanitizer.DisplayName(trimmed))
             : ActionFeedback.StreamAdded(title ?? UrlSanitizer.DisplayName(trimmed)));
         return true;
+    }
+
+    internal static string PreferredExternalPath(string media, string? referer, double? durationSeconds)
+    {
+        if (string.IsNullOrWhiteSpace(referer) || !StreamCatalog.LooksResolvable(referer))
+        {
+            return media;
+        }
+
+        var kickVod = StreamCatalog.TryReadKick(referer, out var kickKind, out _) && kickKind == "video";
+        return kickVod || StreamCatalog.LooksAd(media) || StreamCatalog.RequiresPlayerPage(media) || durationSeconds is > 0 and <= 3
+            ? referer
+            : media;
     }
 
     public void PlayFrom(MediaPlaylist list, int index)
@@ -1866,6 +1895,14 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             try
             {
                 playable = StreamCatalog.Resolve(path, audioLang, subLang);
+                if (StreamCatalog.LooksKickLivePlayback(path) &&
+                    !string.IsNullOrWhiteSpace(item?.Referer) &&
+                    StreamCatalog.TryReadKick(item.Referer, out var kickKind, out var kickId) &&
+                    kickKind == "video")
+                {
+                    playable = StreamCatalog.Resolve(item.Referer, audioLang, subLang);
+                }
+
                 if (playable is not null &&
                     !string.IsNullOrWhiteSpace(item?.Referer) &&
                     string.IsNullOrWhiteSpace(playable.Referer))
@@ -2056,7 +2093,9 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             _audioLang,
             "no",
             StreamCaptionLoader.PlayPath(_captionFile),
-            playable.Referer ?? item?.Referer);
+            playable.Referer ?? item?.Referer,
+            playable.FormatHint,
+            playable.HttpHeaders);
         if (!string.IsNullOrWhiteSpace(_audioLang) || !string.IsNullOrWhiteSpace(_subLang))
         {
             Note("Audio " + (_audioLang ?? "auto") + " · Subtitles " + (_subLang ?? "off"));
@@ -2166,9 +2205,9 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         OnPropertyChanged(nameof(SeekValue));
     }
 
-    private void LoadPath(string path, StreamKind kind, string? audio, string? title, string? userAgent = null, string? audioLang = null, string? subLang = null, string? subFile = null, string? referer = null)
+    private void LoadPath(string path, StreamKind kind, string? audio, string? title, string? userAgent = null, string? audioLang = null, string? subLang = null, string? subFile = null, string? referer = null, string? formatHint = null, string? httpHeaders = null)
     {
-        _player.Open(path, kind, audio, title, userAgent, audioLang, subLang, subFile, referer);
+        _player.Open(path, kind, audio, title, userAgent, audioLang, subLang, subFile, referer, formatHint, httpHeaders);
         OnPropertyChanged(nameof(IsLoading));
     }
 

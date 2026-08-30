@@ -80,8 +80,7 @@ public static class HlsCaptions
             return null;
         }
 
-        return HlsPlaylist.SubtitleUri(manifest, mediaUrl, language) ??
-               HlsPlaylist.SubtitleUri(manifest, mediaUrl, null);
+        return HlsPlaylist.SubtitleUri(manifest, mediaUrl, language);
     }
 
     public static bool IsLiveManifest(string manifest)

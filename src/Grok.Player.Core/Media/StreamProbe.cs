@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 namespace Grok.Player.Core.Media;
 
 public enum StreamKind
@@ -52,10 +54,36 @@ public static class StreamProbe
 
     public static StreamKind ClassifyUrl(string url)
     {
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return StreamKind.Unknown;
+        }
+
         var ext = Extension(url);
         if (ext is ".mp4" or ".mkv" or ".webm" or ".mov" or ".m4v" or ".avi" or ".wmv")
         {
             return StreamKind.Vod;
+        }
+
+        var text = url.ToLowerInvariant();
+        if (text.Contains("hls-vod", StringComparison.Ordinal) ||
+            text.Contains("/vod/", StringComparison.Ordinal) ||
+            text.Contains("master.txt", StringComparison.Ordinal) ||
+            text.Contains("playlist.txt", StringComparison.Ordinal) ||
+            text.Contains("/videos/", StringComparison.Ordinal) ||
+            Regex.IsMatch(text, @"/\d{4}/\d{1,2}/\d{1,2}/"))
+        {
+            return StreamKind.Vod;
+        }
+
+        if (text.Contains("live-video.net", StringComparison.Ordinal) ||
+            text.Contains("usher.ttvnw.net/api/channel", StringComparison.Ordinal) ||
+            text.Contains("/live/", StringComparison.Ordinal) ||
+            text.Contains("/live.", StringComparison.Ordinal) ||
+            text.Contains("live.m3u8", StringComparison.Ordinal) ||
+            text.Contains("/live?", StringComparison.Ordinal))
+        {
+            return StreamKind.Live;
         }
 
         return StreamKind.Unknown;
@@ -89,7 +117,8 @@ public static class StreamProbe
             (contentType?.Contains("mpegurl", StringComparison.OrdinalIgnoreCase) ?? false))
         {
             if (ContainsIgnoreCase(body, "#EXT-X-ENDLIST") ||
-                ContainsIgnoreCase(body, "PLAYLIST-TYPE:VOD"))
+                ContainsIgnoreCase(body, "PLAYLIST-TYPE:VOD") ||
+                ContainsIgnoreCase(body, "PLAYLIST-TYPE:EVENT"))
             {
                 return StreamKind.Vod;
             }
@@ -99,8 +128,7 @@ public static class StreamProbe
                 return StreamKind.Unknown;
             }
 
-            if (ContainsIgnoreCase(body, "PLAYLIST-TYPE:EVENT") ||
-                ContainsIgnoreCase(body, "#EXT-X-MEDIA-SEQUENCE") ||
+            if (ContainsIgnoreCase(body, "#EXT-X-MEDIA-SEQUENCE") ||
                 ContainsIgnoreCase(body, "#EXT-X-TARGETDURATION"))
             {
                 return StreamKind.Live;

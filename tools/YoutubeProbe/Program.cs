@@ -5,6 +5,65 @@ using SkiaSharp;
 using System.Diagnostics;
 
 var url = args.Length > 0 ? args[0] : "https://www.youtube.com/watch?v=WFSdNlLtu7I";
+if (args.Length > 0 && args[0] == "transfer")
+    return TransferEndurance.Run(args);
+if (args.Length > 1 && args[0] == "catalog")
+{
+    var resolved = StreamCatalog.Resolve(args[1]);
+    Console.WriteLine(resolved is null ? "RESOLVE_NULL" : $"id={resolved.VideoId}\nkind={resolved.Kind}\ntitle={resolved.Title}\nmedia={resolved.MediaUrl}\nreferer={resolved.Referer}\nformat={resolved.FormatHint}\nheaders={resolved.HttpHeaders}");
+    return resolved is null ? 2 : 0;
+}
+if (args.Length > 1 && args[0] == "catalog-app")
+{
+    var resolved = StreamCatalog.Resolve(args[1]);
+    if (resolved is null)
+    {
+        Console.WriteLine("RESOLVE_NULL");
+        return 2;
+    }
+
+    using var host = PlayerHost.CreateHeadless();
+    host.Open(resolved.MediaUrl, resolved.Kind, resolved.AudioUrl, resolved.Title, resolved.UserAgent, referer: resolved.Referer, formatHint: resolved.FormatHint, httpHeaders: resolved.HttpHeaders);
+    var until = DateTime.UtcNow.AddSeconds(25);
+    while (DateTime.UtcNow < until)
+    {
+        host.ProcessPendingEvents();
+        if ((host.State is PlayerState.Playing or PlayerState.Paused) && host.Duration?.TotalSeconds > 0)
+        {
+            break;
+        }
+        if (host.State == PlayerState.Error)
+        {
+            break;
+        }
+        Thread.Sleep(40);
+    }
+
+    Console.WriteLine($"state={host.State} duration={host.Duration} position={host.Position} error={host.LastError}");
+    if (host.Duration?.TotalMinutes > 5)
+    {
+        host.Seek(TimeSpan.FromMinutes(10));
+        Thread.Sleep(1200);
+        host.ProcessPendingEvents();
+        Console.WriteLine($"afterSeek={host.Position} state={host.State}");
+    }
+    return host.Duration?.TotalMinutes > 5 ? 0 : 3;
+}
+if (args.Length > 0 && args[0] == "ytdiag")
+{
+    foreach (var target in args.Skip(1).DefaultIfEmpty("https://www.youtube.com/watch?v=dQw4w9wgBcQ"))
+    {
+        var watch = Stopwatch.StartNew();
+        Console.WriteLine(YouTubeCatalog.Diagnose(target));
+        var resolved = YouTubeCatalog.Resolve(target);
+        Console.WriteLine(
+            (resolved is null ? "NULL" : "OK  ") +
+            "  " + target +
+            "  ms=" + watch.ElapsedMilliseconds +
+            (resolved is null ? "" : " kind=" + resolved.Kind + " media=" + resolved.MediaUrl[..Math.Min(90, resolved.MediaUrl.Length)]));
+    }
+    return 0;
+}
 if (args.Length > 0 && args[0] == "cache-preview")
     return await CachePreviewProbe.Run(args.Length > 1 ? args[1] : "https://vs-dash-ww-rd-live.akamaized.net/pl/testcard2020/avc-mobile.m3u8");
 if (args.Length > 0 && args[0] == "live-preview")
