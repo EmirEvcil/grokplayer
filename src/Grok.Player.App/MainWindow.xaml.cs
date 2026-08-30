@@ -433,6 +433,22 @@ public sealed partial class MainWindow : Window
         ShowActionFeedback(_view.LoopLabel);
     }
 
+    private void AudioTrackButton_Click(object sender, RoutedEventArgs e)
+    {
+        _view.CycleAudio();
+        SetText(AudioTrackText, _view.AudioTrackLabel);
+        AudioTrackButton.SetValue(ToolTipService.ToolTipProperty, _view.AudioTrackLabel);
+        ShowActionFeedback(_view.AudioTrackLabel);
+    }
+
+    private void SubtitleTrackButton_Click(object sender, RoutedEventArgs e)
+    {
+        _view.CycleSubtitle();
+        SetText(SubtitleTrackText, _view.SubtitleTrackLabel);
+        SubtitleTrackButton.SetValue(ToolTipService.ToolTipProperty, _view.SubtitleTrackLabel);
+        ShowActionFeedback(_view.SubtitleTrackLabel);
+    }
+
     private void PlaylistButton_Click(object sender, RoutedEventArgs e)
     {
         _view.TogglePlaylist();
@@ -2013,6 +2029,10 @@ public sealed partial class MainWindow : Window
             LoopIcon.Opacity = _view.LoopIsActive ? 1 : 0.45;
 
             LoopButton.SetValue(ToolTipService.ToolTipProperty, _view.LoopLabel);
+            SetText(AudioTrackText, _view.AudioTrackLabel);
+            SetText(SubtitleTrackText, _view.SubtitleTrackLabel);
+            AudioTrackButton.SetValue(ToolTipService.ToolTipProperty, _view.AudioTrackLabel);
+            SubtitleTrackButton.SetValue(ToolTipService.ToolTipProperty, _view.SubtitleTrackLabel);
             ApplyLiveChrome();
             ArmLivePreviewHarvest();
             if (!string.IsNullOrWhiteSpace(_view.StoryboardSpec))
@@ -2516,6 +2536,8 @@ public sealed partial class MainWindow : Window
         yield return ForwardButton;
         yield return OpenButton;
         yield return LoopButton;
+        yield return AudioTrackButton;
+        yield return SubtitleTrackButton;
         yield return ControlPanelButton;
         yield return PlaylistButton;
         yield return PositionTimeHost;

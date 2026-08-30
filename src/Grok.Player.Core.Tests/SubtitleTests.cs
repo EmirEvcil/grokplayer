@@ -37,6 +37,17 @@ public sealed class SubtitleTests
         Assert.Equal("-00:00:01.500", SrtTime.Format(TimeSpan.FromSeconds(-1.5)));
         Assert.Equal(-250, SrtTime.ToMs(TimeSpan.FromMilliseconds(-250)));
         Assert.True(SrtTime.TryParse("-00:00:00.500", out var parsed) && parsed == TimeSpan.FromMilliseconds(-500));
+        Assert.True(SrtTime.TryParse("00:06.666", out var shortCue));
+        Assert.Equal(TimeSpan.FromMilliseconds(6666), shortCue);
+        Assert.True(SrtTime.TryParse("1:00:02.208", out var hourCue));
+        Assert.Equal(TimeSpan.FromHours(1) + TimeSpan.FromMilliseconds(2208), hourCue);
+        Assert.True(SrtTime.TryParseRange("00:06.666 --> 00:09.291", out var start, out var end));
+        Assert.Equal(TimeSpan.FromMilliseconds(6666), start);
+        Assert.Equal(TimeSpan.FromMilliseconds(9291), end);
+        var lotr = SrtDocument.Parse("WEBVTT\n\n00:06.666 --> 00:09.291\nSummon the legions.\n\n1:00:02.208 --> 1:00:03.750\nno idhui.\n", compact: false);
+        Assert.Equal(2, lotr.Cues.Count);
+        Assert.Equal(TimeSpan.FromMilliseconds(6666), lotr.Cues[0].Start);
+        Assert.Equal("Summon the legions.", lotr.Cues[0].Text);
     }
 
     [Fact]

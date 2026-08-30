@@ -35,6 +35,20 @@ public sealed class PlaybackViewModelTests
         Assert.Equal(
             protectedPlayer,
             PlaybackViewModel.PreferredExternalPath(protectedManifest, protectedPlayer, null));
+
+        Assert.Equal(
+            "https://www.dailymotion.com/video/xap6qz2",
+            PlaybackViewModel.PreferredExternalPath(
+                "https://cdndirector.dailymotion.com/cdn/manifest/video/xap6qz2.m3u8?sec=token",
+                "https://www.dailymotion.com/video/xap6qz2",
+                2614));
+
+        Assert.Equal(
+            "https://hdfilmcehennemi.mobi/video/embed/xnZQ9xsXLfb/?rapidrame_id=gr2rb77x3mpm",
+            PlaybackViewModel.PreferredExternalPath(
+                "https://hls8.playmix.uno/hls/film.mp4/master.txt",
+                "https://hdfilmcehennemi.mobi/video/embed/xnZQ9xsXLfb/?rapidrame_id=gr2rb77x3mpm",
+                5400));
     }
 
     [Fact]
@@ -527,6 +541,281 @@ public sealed class PlaybackViewModelTests
             "Two");
         Assert.Equal(144, view.Streams.Items[0].VideoHeight);
         Assert.Equal(1440, view.Streams.Items[1].VideoHeight);
+    }
+
+    [Fact]
+    public void Cycling_a_sidecar_file_fills_on_screen_caption()
+    {
+        var turkish = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-tr.vtt");
+        File.WriteAllText(turkish, "WEBVTT\n\n00:00:00.000 --> 00:00:05.000\nWalt, beynin Wisconsin kadar büyük...\n");
+        try
+        {
+            using var session = Create(open: false);
+            Assert.True(session.View.AddStream(
+                ExternalOpen.ToProtocol(
+                    "https://cdn.example/bb.m3u8",
+                    "BB",
+                    StreamKind.Vod,
+                    captions: [new ExternalCaption("tr", turkish, "Turkish")]),
+                play: true));
+            var until = DateTime.UtcNow.AddSeconds(3);
+            while (DateTime.UtcNow < until)
+            {
+                session.Host.ProcessPendingEvents();
+                session.View.CycleSubtitle();
+                if (session.View.SubtitleTrackLabel.Contains("Türkçe", StringComparison.Ordinal))
+                {
+                    break;
+                }
+
+                Thread.Sleep(20);
+            }
+
+            session.Host.ProcessPendingEvents();
+            Assert.Contains("Wisconsin", session.View.OnScreenCaption);
+        }
+        finally
+        {
+            File.Delete(turkish);
+        }
+    }
+
+    [Fact]
+    public void Youtube_asr_and_official_turkish_are_separate_cycle_choices()
+    {
+        var official = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-tr.vtt");
+        var asr = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-asr.vtt");
+        File.WriteAllText(official, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nMerhaba\n");
+        File.WriteAllText(asr, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nmerhaba\n");
+        try
+        {
+            using var session = Create(open: false);
+            Assert.True(session.View.AddStream(
+                ExternalOpen.ToProtocol(
+                    "https://cdn.example/master.m3u8",
+                    "Talk",
+                    StreamKind.Vod,
+                    captions:
+                    [
+                        new ExternalCaption("en", official, "English"),
+                        new ExternalCaption("tr", official, "Turkish"),
+                        new ExternalCaption("tr:asr", asr, "Turkish")
+                    ]),
+                play: true));
+            var until = DateTime.UtcNow.AddSeconds(3);
+            var labels = new List<string>();
+            while (DateTime.UtcNow < until)
+            {
+                session.Host.ProcessPendingEvents();
+                session.View.CycleSubtitle();
+                labels.Add(session.View.SubtitleTrackLabel);
+                if (labels.Contains("Subs Off") &&
+                    labels.Contains("Subs English") &&
+                    labels.Contains("Subs Türkçe") &&
+                    labels.Contains("Subs Türkçe (auto)"))
+                {
+                    break;
+                }
+
+                Thread.Sleep(20);
+            }
+
+            Assert.Contains("Subs English", labels);
+            Assert.Contains("Subs Türkçe", labels);
+            Assert.Contains("Subs Türkçe (auto)", labels);
+            Assert.DoesNotContain("Subs tr:asr", labels);
+        }
+        finally
+        {
+            File.Delete(official);
+            File.Delete(asr);
+        }
+    }
+
+    [Fact]
+    public void Stream_off_still_lists_named_sidecar_choices()
+    {
+        var english = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-en.vtt");
+        var turkish = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-tr.vtt");
+        File.WriteAllText(english, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello\n");
+        File.WriteAllText(turkish, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nMerhaba\n");
+        try
+        {
+            using var session = Create(open: false);
+            session.View.SetStreamSubtitleMode(StreamSubtitleMode.Off);
+            Assert.True(session.View.AddStream(
+                ExternalOpen.ToProtocol(
+                    "https://cdn.example/somebody.m3u8",
+                    "Somebody",
+                    StreamKind.Vod,
+                    captions:
+                    [
+                        new ExternalCaption("en", english, "English"),
+                        new ExternalCaption("tr", turkish, "Turkish")
+                    ]),
+                play: true));
+            var until = DateTime.UtcNow.AddSeconds(3);
+            var labels = new List<string>();
+            while (DateTime.UtcNow < until)
+            {
+                session.Host.ProcessPendingEvents();
+                session.View.CycleSubtitle();
+                labels.Add(session.View.SubtitleTrackLabel);
+                if (labels.Contains("Subs English") && labels.Contains("Subs Türkçe"))
+                {
+                    break;
+                }
+
+                Thread.Sleep(20);
+            }
+
+            Assert.Contains("Subs English", labels);
+            Assert.Contains("Subs Türkçe", labels);
+        }
+        finally
+        {
+            File.Delete(english);
+            File.Delete(turkish);
+        }
+    }
+
+    [Fact]
+    public void Leftover_youtube_asr_lang_does_not_hide_hdfilm_sidecars()
+    {
+        var english = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-en.vtt");
+        var turkish = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-tr.vtt");
+        File.WriteAllText(english, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello\n");
+        File.WriteAllText(turkish, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nMerhaba\n");
+        try
+        {
+            var fake = new FakeMpvNative();
+            using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+            using var view = new PlaybackViewModel(
+                host,
+                streamSubtitles: new StreamSubtitleSettings { Mode = StreamSubtitleMode.On, LastSub = "tr:asr" });
+            fake.SeedTrack(0, "sub", 1, "en", "English", false);
+            fake.SeedTrack(1, "sub", 2, "tr", "Turkish", false);
+            Assert.True(view.AddStream(
+                ExternalOpen.ToProtocol(
+                    "https://cdn.example/somebody.m3u8",
+                    "Somebody",
+                    StreamKind.Vod,
+                    captions:
+                    [
+                        new ExternalCaption("en", english, "English"),
+                        new ExternalCaption("tr", turkish, "Turkish")
+                    ]),
+                play: true));
+            var until = DateTime.UtcNow.AddSeconds(3);
+            var labels = new List<string>();
+            while (DateTime.UtcNow < until)
+            {
+                host.ProcessPendingEvents();
+                view.CycleSubtitle();
+                labels.Add(view.SubtitleTrackLabel);
+                if (labels.Contains("Subs English") && labels.Contains("Subs Türkçe"))
+                {
+                    break;
+                }
+
+                Thread.Sleep(20);
+            }
+
+            Assert.DoesNotContain(labels, item => item.Contains("tr:asr", StringComparison.Ordinal));
+            Assert.Contains("Subs English", labels);
+            Assert.Contains("Subs Türkçe", labels);
+        }
+        finally
+        {
+            File.Delete(english);
+            File.Delete(turkish);
+        }
+    }
+
+    [Fact]
+    public void Stream_subtitle_off_clears_youtube_captions_and_keeps_them_off()
+    {
+        var vtt = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".vtt");
+        File.WriteAllText(vtt, "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nOn screen\n");
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(
+            host,
+            streamSubtitles: new StreamSubtitleSettings { Mode = StreamSubtitleMode.On });
+        view.ResolveYouTube = _ => new YouTubePlayable(
+            "n9izgGYxxx1",
+            "https://manifest.googlevideo.com/api/manifest/hls_variant/vod.m3u8",
+            "Talk",
+            StreamKind.Vod,
+            captionUrl: vtt);
+        view.AddStream("https://www.youtube.com/watch?v=n_9izgGY-_E", play: true);
+        var until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until && view.Subtitles.Applied is null)
+        {
+            Thread.Sleep(20);
+            host.ProcessPendingEvents();
+        }
+
+        Assert.NotNull(view.Subtitles.Applied);
+        host.Seek(TimeSpan.FromSeconds(1));
+        host.ProcessPendingEvents();
+        Assert.Equal("On screen", view.OnScreenCaption);
+        var commandsBeforeOff = fake.Commands.Count;
+
+        view.SetStreamSubtitleMode(StreamSubtitleMode.Off);
+        host.ProcessPendingEvents();
+        view.ApplySubtitleTrack();
+        host.ProcessPendingEvents();
+
+        Assert.Equal(StreamSubtitleMode.Off, view.StreamSubtitles.Mode);
+        Assert.Null(view.Subtitles.Applied);
+        Assert.Null(view.OnScreenCaption);
+        Assert.Equal("Subs Off", view.SubtitleTrackLabel);
+        Assert.DoesNotContain(
+            fake.Commands.Skip(commandsBeforeOff),
+            command => command.Length >= 1 && command[0] == "sub-add");
+        File.Delete(vtt);
+    }
+
+    [Fact]
+    public void Youtube_cycle_off_clears_applied_stream_caption()
+    {
+        var vtt = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".vtt");
+        File.WriteAllText(vtt, "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nOn screen\n");
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        view.ResolveYouTube = _ => new YouTubePlayable(
+            "n9izgGYxxx2",
+            "https://manifest.googlevideo.com/api/manifest/hls_variant/vod.m3u8",
+            "Talk",
+            StreamKind.Vod,
+            captionUrl: vtt);
+        view.AddStream(
+            "grokplayer://open?url=" + Uri.EscapeDataString("https://www.youtube.com/watch?v=n_9izgGY-_E") + "&sub=en",
+            play: true);
+        var until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until && view.Subtitles.Applied is null)
+        {
+            Thread.Sleep(20);
+            host.ProcessPendingEvents();
+        }
+
+        Assert.NotNull(view.Subtitles.Applied);
+        for (var i = 0; i < 4 && view.SubtitleTrackLabel != "Subs Off"; i++)
+        {
+            view.CycleSubtitle();
+            host.ProcessPendingEvents();
+        }
+
+        Assert.Equal("Subs Off", view.SubtitleTrackLabel);
+        Assert.Null(view.Subtitles.Applied);
+        Assert.Null(view.OnScreenCaption);
+        view.ApplySubtitleTrack();
+        host.ProcessPendingEvents();
+        Assert.Null(view.Subtitles.Applied);
+        Assert.Null(view.OnScreenCaption);
+        File.Delete(vtt);
     }
 
     [Fact]
@@ -1147,6 +1436,362 @@ public sealed class PlaybackViewModelTests
         Assert.NotNull(view.Subtitles.Applied);
         Assert.Equal("Auto generated", view.Subtitles.Applied!.Document.Cues[0].Text);
         File.Delete(vtt);
+    }
+
+    [Fact]
+    public void Protocol_caption_list_is_stored_and_tracks_cycle_in_the_player()
+    {
+        var english = "https://cdn.example/en.vtt";
+        var turkish = "https://cdn.example/tr.vtt";
+        using var session = Create(open: false);
+        session.Fake.SeedTrack(0, "audio", 1, "ger", "German", true);
+        session.Fake.SeedTrack(1, "audio", 2, "tur", "Turkish", false);
+        session.Fake.SeedTrack(2, "sub", 1, "en", "English", false);
+        session.Fake.SeedTrack(3, "sub", 2, "tr", "Turkish", false);
+        var protocol = ExternalOpen.ToProtocol(
+            "https://cdn.example/master.m3u8",
+            "Episode",
+            StreamKind.Vod,
+            captions:
+            [
+                new ExternalCaption("en", english, "English"),
+                new ExternalCaption("tr", turkish, "Turkish")
+            ]);
+        Assert.True(session.View.AddStream(protocol, play: false, "Episode"));
+        var item = session.View.Streams.Items[0];
+        Assert.Equal(2, item.CaptionTracks.Count);
+        Assert.Equal(english, item.CaptionTracks[0].Url);
+        Assert.Equal(turkish, item.CaptionTracks[1].Url);
+        Assert.Null(item.AudioLang);
+        Assert.Null(item.SubLang);
+
+        session.View.Open(TestMedia.CreateTempFile("movie.mp4"));
+        session.Host.ProcessPendingEvents();
+        Assert.Equal("Audio German", session.View.AudioTrackLabel);
+        Assert.Equal("Subs Off", session.View.SubtitleTrackLabel);
+
+        session.View.CycleAudio();
+        Assert.Equal("Audio Turkish", session.View.AudioTrackLabel);
+        session.View.CycleAudio();
+        Assert.Equal("Audio German", session.View.AudioTrackLabel);
+
+        session.View.CycleSubtitle();
+        Assert.Equal("Subs English", session.View.SubtitleTrackLabel);
+        session.View.CycleSubtitle();
+        Assert.Equal("Subs Türkçe", session.View.SubtitleTrackLabel);
+        session.View.CycleSubtitle();
+        Assert.Equal("Subs Off", session.View.SubtitleTrackLabel);
+    }
+
+    [Fact]
+    public void Forced_hls_turkish_is_not_a_cycle_choice()
+    {
+        using var session = Create(open: false);
+        session.Fake.SeedTrack(0, "sub", 1, "tur", "Türkçe", false);
+        session.Fake.SeedTrack(1, "sub", 2, "eng", "İngilizce", false);
+        session.Fake.SeedTrack(2, "sub", 3, "tur", "Türkçe (Zorunlu)", false);
+        session.View.Open(TestMedia.CreateTempFile("movie.mp4"));
+        session.Host.ProcessPendingEvents();
+        var labels = new List<string>();
+        for (var i = 0; i < 3; i++)
+        {
+            session.View.CycleSubtitle();
+            labels.Add(session.View.SubtitleTrackLabel);
+        }
+
+        Assert.Equal(["Subs Türkçe", "Subs English", "Subs Off"], labels);
+    }
+
+    [Fact]
+    public void Unnamed_hls_stub_does_not_appear_as_subs_subtitle()
+    {
+        var english = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-en.vtt");
+        var turkish = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-tr.vtt");
+        File.WriteAllText(english, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello\n");
+        File.WriteAllText(turkish, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nMerhaba\n");
+        try
+        {
+            using var session = Create(open: false);
+            session.Fake.SeedTrack(0, "sub", 1, "en", "English", false);
+            session.Fake.SeedTrack(1, "sub", 2, "tr", "Turkish", false);
+            session.Fake.SeedTrack(2, "sub", 3, "", "Subtitle", false);
+            session.Fake.SeedTrack(3, "sub", 4, "und", "Original", false);
+            Assert.True(session.View.AddStream(
+                ExternalOpen.ToProtocol(
+                    "https://cdn.example/master.m3u8",
+                    "Episode",
+                    StreamKind.Vod,
+                    captions:
+                    [
+                        new ExternalCaption("en", english, "English"),
+                        new ExternalCaption("tr", turkish, "Turkish")
+                    ]),
+                play: true));
+            var labels = new List<string>();
+            var until = DateTime.UtcNow.AddSeconds(3);
+            while (DateTime.UtcNow < until)
+            {
+                session.Host.ProcessPendingEvents();
+                session.View.CycleSubtitle();
+                labels.Add(session.View.SubtitleTrackLabel);
+                if (labels.Contains("Subs Off") && labels.Contains("Subs English") && labels.Contains("Subs Türkçe"))
+                {
+                    break;
+                }
+
+                Thread.Sleep(20);
+            }
+
+            Assert.Contains("Subs English", labels);
+            Assert.Contains("Subs Türkçe", labels);
+            Assert.DoesNotContain("Subs subtitle", labels);
+            Assert.DoesNotContain("Subs Subtitle", labels);
+            Assert.DoesNotContain("Subs original", labels);
+            Assert.DoesNotContain("Subs Original", labels);
+        }
+        finally
+        {
+            File.Delete(english);
+            File.Delete(turkish);
+        }
+    }
+
+    [Fact]
+    public void Tr_sidecar_file_is_used_instead_of_empty_hls_turkish()
+    {
+        var english = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-en.vtt");
+        var turkish = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-tr.vtt");
+        File.WriteAllText(english, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello\n");
+        File.WriteAllText(turkish, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nMerhaba\n");
+        try
+        {
+            using var session = Create(open: false);
+            session.Fake.SeedTrack(0, "sub", 1, "en", "English", false);
+            session.Fake.SeedTrack(1, "sub", 2, "tr", "Turkish", false);
+            session.Fake.SeedTrack(2, "sub", 3, "", "subtitle", false);
+            Assert.True(session.View.AddStream(
+                ExternalOpen.ToProtocol(
+                    "https://cdn.example/master.m3u8",
+                    "Episode",
+                    StreamKind.Vod,
+                    captions:
+                    [
+                        new ExternalCaption("en", english, "English"),
+                        new ExternalCaption("tr", turkish, "tr")
+                    ]),
+                play: true));
+            var labels = new List<string>();
+            var until = DateTime.UtcNow.AddSeconds(3);
+            while (DateTime.UtcNow < until)
+            {
+                session.Host.ProcessPendingEvents();
+                session.View.CycleSubtitle();
+                labels.Add(session.View.SubtitleTrackLabel);
+                if (labels.Contains("Subs Off") && labels.Contains("Subs English") && labels.Contains("Subs Türkçe"))
+                {
+                    break;
+                }
+
+                Thread.Sleep(20);
+            }
+
+            Assert.Contains("Subs English", labels);
+            Assert.Contains("Subs Türkçe", labels);
+            Assert.DoesNotContain("Subs tr", labels);
+            Assert.DoesNotContain("Subs subtitle", labels);
+        }
+        finally
+        {
+            File.Delete(english);
+            File.Delete(turkish);
+        }
+    }
+
+    [Fact]
+    public void Weak_tr_sidecar_does_not_hide_english_and_turkish_tracks()
+    {
+        var leftover = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-tr.vtt");
+        File.WriteAllText(leftover, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nMerhaba\n");
+        try
+        {
+            using var session = Create(open: false);
+            session.Fake.SeedTrack(0, "sub", 1, "en", "English", false);
+            session.Fake.SeedTrack(1, "sub", 2, "tr", "Turkish", false);
+            Assert.True(session.View.AddStream(
+                ExternalOpen.ToProtocol(
+                    "https://cdn.example/master.m3u8",
+                    "Episode",
+                    StreamKind.Vod,
+                    captions: [new ExternalCaption("tr", leftover, "tr")]),
+                play: true));
+            var until = DateTime.UtcNow.AddSeconds(3);
+            var labels = new List<string>();
+            while (DateTime.UtcNow < until)
+            {
+                session.Host.ProcessPendingEvents();
+                session.View.CycleSubtitle();
+                labels.Add(session.View.SubtitleTrackLabel);
+                if (labels.Contains("Subs Off") && labels.Contains("Subs English") && labels.Contains("Subs Türkçe"))
+                {
+                    break;
+                }
+
+                Thread.Sleep(20);
+            }
+
+            Assert.Contains("Subs English", labels);
+            Assert.Contains("Subs Türkçe", labels);
+            Assert.DoesNotContain("Subs tr", labels);
+        }
+        finally
+        {
+            File.Delete(leftover);
+        }
+    }
+
+    [Fact]
+    public void Named_english_and_turkish_sidecars_are_applied_instead_of_empty_hls_stubs()
+    {
+        var english = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-en.vtt");
+        var turkish = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-engtr.vtt");
+        File.WriteAllText(english, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello\n");
+        File.WriteAllText(turkish, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nMerhaba\n");
+        try
+        {
+            using var session = Create(open: false);
+            session.Fake.SeedTrack(0, "sub", 1, "en", "English", false);
+            session.Fake.SeedTrack(1, "sub", 2, "tr", "Turkish", false);
+            Assert.True(session.View.AddStream(
+                ExternalOpen.ToProtocol(
+                    "https://cdn.example/master.m3u8",
+                    "Episode",
+                    StreamKind.Vod,
+                    captions:
+                    [
+                        new ExternalCaption("en", english, "English"),
+                        new ExternalCaption("tr", turkish, "Turkish")
+                    ]),
+                play: true));
+            string? label = null;
+            var until = DateTime.UtcNow.AddSeconds(3);
+            while (DateTime.UtcNow < until)
+            {
+                session.Host.ProcessPendingEvents();
+                session.View.CycleSubtitle();
+                label = session.View.SubtitleTrackLabel;
+                if (label == "Subs English")
+                {
+                    break;
+                }
+
+                Thread.Sleep(20);
+            }
+
+            Assert.Equal("Subs English", label);
+            session.View.CycleSubtitle();
+            Assert.Equal("Subs Türkçe", session.View.SubtitleTrackLabel);
+            session.View.CycleSubtitle();
+            Assert.Equal("Subs Off", session.View.SubtitleTrackLabel);
+        }
+        finally
+        {
+            File.Delete(english);
+            File.Delete(turkish);
+        }
+    }
+
+    [Fact]
+    public void Sidecar_captions_cycle_even_when_mpv_has_no_sub_tracks()
+    {
+        var english = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-en.vtt");
+        var turkish = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-tr.vtt");
+        File.WriteAllText(english, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello\n");
+        File.WriteAllText(turkish, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nMerhaba\n");
+        try
+        {
+            using var session = Create(open: false);
+            Assert.True(session.View.AddStream(
+                ExternalOpen.ToProtocol(
+                    "https://cdn.example/master.m3u8",
+                    "Episode",
+                    StreamKind.Vod,
+                    captions:
+                    [
+                        new ExternalCaption("en", english, "English"),
+                        new ExternalCaption("tr", turkish, "Turkish")
+                    ]),
+                play: true));
+            string? label = null;
+            var until = DateTime.UtcNow.AddSeconds(3);
+            while (DateTime.UtcNow < until)
+            {
+                session.Host.ProcessPendingEvents();
+                session.View.CycleSubtitle();
+                label = session.View.SubtitleTrackLabel;
+                if (label == "Subs English")
+                {
+                    break;
+                }
+
+                Thread.Sleep(20);
+            }
+
+            Assert.Equal("Subs English", label);
+            session.View.CycleSubtitle();
+            Assert.Equal("Subs Türkçe", session.View.SubtitleTrackLabel);
+            session.View.TogglePlayPause();
+            session.Host.ProcessPendingEvents();
+            Assert.Equal("Subs Türkçe", session.View.SubtitleTrackLabel);
+            session.View.TogglePlayPause();
+            session.Host.ProcessPendingEvents();
+            Assert.Equal("Subs Türkçe", session.View.SubtitleTrackLabel);
+            session.View.CycleSubtitle();
+            Assert.Equal("Subs Off", session.View.SubtitleTrackLabel);
+            session.View.TogglePlayPause();
+            session.Host.ProcessPendingEvents();
+            Assert.Equal("Subs Off", session.View.SubtitleTrackLabel);
+        }
+        finally
+        {
+            File.Delete(english);
+            File.Delete(turkish);
+        }
+    }
+
+    [Fact]
+    public void Youtube_protocol_without_cap_list_still_applies_the_selected_caption()
+    {
+        var caption = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".vtt");
+        File.WriteAllText(caption, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello\n");
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        view.ResolveYouTube = _ => new YouTubePlayable(
+            "dQw4w9wgBcQ",
+            "https://manifest.googlevideo.com/api/manifest/hls_variant/vod.m3u8",
+            "Song",
+            StreamKind.Vod,
+            captionUrl: caption);
+        view.AddStream(
+            ExternalOpen.ToProtocol(
+                "https://www.youtube.com/watch?v=dQw4w9wgBcQ",
+                "Song",
+                StreamKind.Vod,
+                "tr",
+                "en",
+                captionUrl: caption),
+            play: true);
+        var until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until && view.Subtitles.Applied?.Document.Cues[0].Text != "Hello")
+        {
+            Thread.Sleep(20);
+            host.ProcessPendingEvents();
+        }
+
+        Assert.Equal("tr", view.PreferredAudioLang);
+        Assert.Equal("en", view.PreferredSubLang);
+        Assert.Equal("Hello", view.Subtitles.Applied?.Document.Cues[0].Text);
+        File.Delete(caption);
     }
 
     [Fact]

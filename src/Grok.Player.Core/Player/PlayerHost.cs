@@ -80,6 +80,8 @@ public sealed class PlayerHost : IDisposable
 
     public string? LastError { get; private set; }
 
+    public string? LastSubtitleError { get; private set; }
+
     public bool IsMuted { get; private set; }
 
     public bool HasVideo { get; private set; } = true;
@@ -229,7 +231,21 @@ public sealed class PlayerHost : IDisposable
 
         try
         {
-            _mpv.Command("loadfile", trimmed, "replace");
+            if (!string.IsNullOrWhiteSpace(subFile) && File.Exists(subFile))
+            {
+                try
+                {
+                    _mpv.Command("loadfile", trimmed, "replace", "sub-file=" + subFile.Replace('\\', '/'));
+                }
+                catch (MpvException)
+                {
+                    _mpv.Command("loadfile", trimmed, "replace");
+                }
+            }
+            else
+            {
+                _mpv.Command("loadfile", trimmed, "replace");
+            }
             _mpv.SetPropertyFlag("pause", false);
         }
         catch (MpvException ex)
@@ -706,37 +722,22 @@ public sealed class PlayerHost : IDisposable
     {
         EnsureNotDisposed();
         _styledSubtitle = path?.EndsWith(".ass", StringComparison.OrdinalIgnoreCase) == true;
-        try
-        {
-            _mpv.SetPropertyString("sid", "no");
-        }
-        catch (MpvException)
-        {
-        }
-
-        try
-        {
-            _mpv.Command("sub-remove");
-        }
-        catch (MpvException)
-        {
-        }
-
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
         {
+            TrySetProperty("sid", "no");
             return string.IsNullOrWhiteSpace(path);
         }
 
         try
         {
-            _mpv.Command("sub-add", path, "select");
-            TrySetProperty("slang", "no");
+            if (!SelectAddedSubtitle(path) && !AddSubtitleFile(path, select: true))
+            {
+                return false;
+            }
+
             TrySetProperty("sub-visibility", "yes");
-            SelectAddedSubtitle(path);
             if (path.EndsWith(".ass", StringComparison.OrdinalIgnoreCase))
             {
-                // Override the base font/size with the control panel settings,
-                // while preserving inline color and emphasis tags.
                 TrySetProperty("sub-ass-override", "yes");
                 ApplyAssBaseStyle();
             }
@@ -746,23 +747,94 @@ public sealed class PlayerHost : IDisposable
                 TrySetProperty("blend-subtitles", "yes");
             }
 
-            return true;
+            return SelectAddedSubtitle(path) || SelectLastExternalSubtitle();
         }
         catch (MpvException)
         {
-            return false;
+            return SelectAddedSubtitle(path) || SelectLastExternalSubtitle();
         }
     }
 
-    private void SelectAddedSubtitle(string path)
+    private bool SelectAddedSubtitle(string path)
     {
         var count = _mpv.GetPropertyLong("track-list/count") ?? 0;
-        long? fallback = null;
         for (var i = 0; i < count && i < 80; i++)
         {
             var prefix = "track-list/" + i + "/";
             var type = _mpv.GetPropertyString(prefix + "type") ?? "";
             if (!type.Equals("sub", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (_mpv.GetPropertyFlag(prefix + "external") != true)
+            {
+                continue;
+            }
+
+            var id = _mpv.GetPropertyLong(prefix + "id");
+            var src = _mpv.GetPropertyString(prefix + "external-filename") ?? "";
+            if (id is null || !SameSubtitlePath(src, path))
+            {
+                continue;
+            }
+
+            TrySetProperty("sid", id.Value.ToString(CultureInfo.InvariantCulture));
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool SelectLastExternalSubtitle()
+    {
+        var tracks = ListTracks("sub");
+        for (var i = tracks.Count - 1; i >= 0; i--)
+        {
+            if (!tracks[i].External)
+            {
+                continue;
+            }
+
+            TrySetProperty("sid", tracks[i].Id.ToString(CultureInfo.InvariantCulture));
+            return true;
+        }
+
+        return false;
+    }
+
+    internal static bool SameSubtitlePath(string? left, string? right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+        {
+            return false;
+        }
+
+        static string Norm(string value) =>
+            value.Replace('/', '\\').Trim().Trim('"');
+
+        if (string.Equals(Norm(left), Norm(right), StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return string.Equals(
+            Path.GetFileName(Norm(left)),
+            Path.GetFileName(Norm(right)),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    public IReadOnlyList<PlayerTrack> ListTracks(string type)
+    {
+        EnsureNotDisposed();
+        var want = string.IsNullOrWhiteSpace(type) ? "" : type.Trim();
+        var list = new List<PlayerTrack>();
+        var count = _mpv.GetPropertyLong("track-list/count") ?? 0;
+        for (var i = 0; i < count && i < 80; i++)
+        {
+            var prefix = "track-list/" + i + "/";
+            var found = _mpv.GetPropertyString(prefix + "type") ?? "";
+            if (want.Length > 0 && !found.Equals(want, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
@@ -773,18 +845,233 @@ public sealed class PlayerHost : IDisposable
                 continue;
             }
 
-            fallback = id;
-            var src = _mpv.GetPropertyString(prefix + "external-filename") ?? "";
-            if (src.Length > 0 && src.Equals(path, StringComparison.OrdinalIgnoreCase))
+            list.Add(new PlayerTrack(
+                found,
+                id.Value,
+                _mpv.GetPropertyString(prefix + "lang") ?? "",
+                _mpv.GetPropertyString(prefix + "title") ?? "",
+                _mpv.GetPropertyFlag(prefix + "selected") == true,
+                _mpv.GetPropertyFlag(prefix + "external") == true));
+        }
+
+        return list;
+    }
+
+    public void SetAssOverlay(string? text)
+    {
+        EnsureNotDisposed();
+        var body = OverlayEventText(text);
+        try
+        {
+            if (body.Length == 0)
             {
-                TrySetProperty("sid", id.Value.ToString());
+                _mpv.Command("osd-overlay", "id=42", "format=none", "data=");
+                try
+                {
+                    _mpv.Command("show-text", "", "0");
+                }
+                catch (MpvException)
+                {
+                }
+
                 return;
+            }
+
+            TrySetProperty("osd-font-size", "36");
+            TrySetProperty("osd-border-size", "2.5");
+            TrySetProperty("osd-shadow-offset", "1");
+            TrySetProperty("osd-color", "#FFFFFFFF");
+            TrySetProperty("osd-border-color", "#FF000000");
+            _mpv.Command(
+                "osd-overlay",
+                "id=42",
+                "format=ass-events",
+                "res_x=1920",
+                "res_y=1080",
+                "z=10",
+                "data=Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an2}" + body);
+        }
+        catch (MpvException)
+        {
+            try
+            {
+                if (body.Length == 0)
+                {
+                    _mpv.Command("show-text", "", "0");
+                    return;
+                }
+
+                TrySetProperty("osd-align-x", "center");
+                TrySetProperty("osd-align-y", "bottom");
+                TrySetProperty("osd-border-size", "2.5");
+                TrySetProperty("osd-font-size", "36");
+                TrySetProperty("osd-margin-y", "24");
+                _mpv.Command("show-text", body, "86400000");
+            }
+            catch (MpvException)
+            {
+            }
+        }
+    }
+
+    private static string OverlayEventText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return "";
+        }
+
+        var builder = new System.Text.StringBuilder(text.Length);
+        var inTag = false;
+        foreach (var ch in text)
+        {
+            if (ch == '{')
+            {
+                inTag = true;
+                continue;
+            }
+
+            if (inTag)
+            {
+                if (ch == '}')
+                {
+                    inTag = false;
+                }
+
+                continue;
+            }
+
+            if (ch == '\r')
+            {
+                continue;
+            }
+
+            if (ch == '\n')
+            {
+                builder.Append("\\N");
+                continue;
+            }
+
+            if (ch == '\\')
+            {
+                builder.Append("\\\\");
+                continue;
+            }
+
+            builder.Append(ch);
+        }
+
+        return builder.ToString().Trim();
+    }
+
+    public bool SetSubtitleFilter(string? path)
+    {
+        EnsureNotDisposed();
+        ClearSubtitleFilter();
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return false;
+        }
+
+        var slash = path.Replace('\\', '/');
+        var escaped = slash
+            .Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace(":", "\\:", StringComparison.Ordinal)
+            .Replace("'", "\\'", StringComparison.Ordinal);
+        foreach (var spec in new[]
+                 {
+                     "@cues:lavfi=[subtitles=filename='" + escaped + "']",
+                     "@cues:subtitles=filename=" + escaped,
+                     "@cues:subtitles=" + slash
+                 })
+        {
+            try
+            {
+                _mpv.Command("vf", "add", spec);
+                return true;
+            }
+            catch (MpvException)
+            {
             }
         }
 
-        if (fallback is { } sid)
+        return false;
+    }
+
+    public void ClearSubtitleFilter()
+    {
+        EnsureNotDisposed();
+        try
         {
-            TrySetProperty("sid", sid.ToString());
+            _mpv.Command("vf", "remove", "@cues");
+        }
+        catch (MpvException)
+        {
+        }
+    }
+
+    public void SetTrack(string type, long? id)
+    {
+        EnsureNotDisposed();
+        if (type.Equals("sub", StringComparison.OrdinalIgnoreCase))
+        {
+            TrySetProperty("sid", id is null ? "no" : id.Value.ToString(CultureInfo.InvariantCulture));
+            TrySetProperty("sub-visibility", id is null ? "no" : "yes");
+            return;
+        }
+
+        if (type.Equals("audio", StringComparison.OrdinalIgnoreCase) && id is { } aid)
+        {
+            TrySetProperty("aid", aid.ToString(CultureInfo.InvariantCulture));
+        }
+    }
+
+    public bool AddSubtitleFile(string path, bool select)
+    {
+        EnsureNotDisposed();
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            LastSubtitleError = null;
+            try
+            {
+                _mpv.Command("sub-add", path, select ? "select" : "auto");
+            }
+            catch (MpvException first)
+            {
+                LastSubtitleError = first.Message;
+                var uri = new Uri(path).AbsoluteUri;
+                try
+                {
+                    _mpv.Command("sub-add", uri, select ? "select" : "auto");
+                    LastSubtitleError = null;
+                }
+                catch (MpvException second)
+                {
+                    LastSubtitleError = first.Message + " | " + second.Message;
+                    _mpv.SetPropertyString("sub-files", path);
+                }
+            }
+
+            if (select)
+            {
+                TrySetProperty("sub-visibility", "yes");
+                if (!SelectAddedSubtitle(path) && !SelectAddedSubtitle(new Uri(path).AbsoluteUri))
+                {
+                    SelectLastExternalSubtitle();
+                }
+            }
+
+            return ListTracks("sub").Any(track => track.External);
+        }
+        catch (MpvException ex)
+        {
+            LastSubtitleError = ex.Message;
+            return false;
         }
     }
 

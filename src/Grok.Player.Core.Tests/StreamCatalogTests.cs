@@ -1,5 +1,6 @@
 using Grok.Player.Core.Download;
 using Grok.Player.Core.Media;
+using Grok.Player.Core.Subtitles;
 
 namespace Grok.Player.Core.Tests;
 
@@ -144,6 +145,30 @@ public sealed class StreamCatalogTests
             "https://cdn.example/en.m3u8",
             HlsCaptions.SubtitleUriFromManifest(master, "https://cdn.example/master.m3u8", "en"));
         Assert.False(HlsCaptions.IsLiveManifest(master));
+    }
+
+    [Fact]
+    public void Hls_subtitle_list_skips_forced_and_keeps_named_tracks()
+    {
+        const string master =
+            """
+            #EXTM3U
+            #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="sub",NAME="Türkçe",LANGUAGE="tur",DEFAULT=NO,AUTOSELECT=NO,FORCED=NO,URI="sub-tur.m3u8"
+            #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="sub",NAME="İngilizce",LANGUAGE="eng",DEFAULT=NO,AUTOSELECT=NO,FORCED=NO,URI="sub-eng.m3u8"
+            #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="sub",NAME="Türkçe (Zorunlu)",LANGUAGE="tur",DEFAULT=NO,AUTOSELECT=YES,FORCED=YES,URI="sub-tur-forced.m3u8"
+            #EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=1280x720,SUBTITLES="sub"
+            720.m3u8
+            """;
+        var subs = HlsPlaylist.Subtitles(master, "https://cdn.example/master.m3u8");
+        Assert.Equal(3, subs.Count);
+        Assert.Equal("https://cdn.example/sub-tur.m3u8", subs[0].Url);
+        Assert.Equal("tur", subs[0].Language);
+        Assert.Equal("Türkçe", subs[0].Name);
+        Assert.False(subs[0].Forced);
+        Assert.Equal("İngilizce", subs[1].Name);
+        Assert.False(subs[1].Forced);
+        Assert.True(subs[2].Forced);
+        Assert.Equal("https://cdn.example/sub-tur-forced.m3u8", subs[2].Url);
     }
 
     [Fact]
@@ -407,7 +432,8 @@ public sealed class StreamCatalogTests
         Assert.True(StreamCatalog.MediaScore(rekla) < 0);
         Assert.False(StreamCatalog.LooksAd(master));
         Assert.True(StreamCatalog.IsDirectMedia(master));
-        Assert.True(StreamCatalog.MediaScore(master) > StreamCatalog.MediaScore("https://cdn.film/360.mp4"));
+        Assert.True(StreamCatalog.LooksDecoyManifest(master));
+        Assert.True(StreamCatalog.MediaScore(master) < StreamCatalog.MediaScore("https://cdn.film/movie.m3u8"));
 
         const string pageHtml =
             """
@@ -425,7 +451,8 @@ public sealed class StreamCatalogTests
             """
             {"contentUrl":"https://hls8.playmix.uno/hls/filmakinesimp4-f9gx1M12BwC.mp4/master.txt"}
             """;
-        Assert.Equal(master, StreamCatalog.PickMediaUrl(StreamCatalog.MediaUrlsIn(embedHtml)));
+        var embedUrls = StreamCatalog.MediaUrlsIn(embedHtml);
+        Assert.Contains(master, embedUrls);
 
         var packed = StreamCatalog.DecodePackedPlayerUrl([
             "=dxFTU1XdCF", "GiTPHIQEChX", "xXGUkF2G1CZ", "5PlH9FFlo1F", "UQOXZMyEGY2",
@@ -449,7 +476,316 @@ public sealed class StreamCatalogTests
             var s_JgunxLuRzKs = dc_43u5cEA0dQp(["=dxFTU1XdCF","GiTPHIQEChX","xXGUkF2G1CZ","5PlH9FFlo1F","UQOXZMyEGY2","CzaxEesRXsK","uHSGQYvayER","5PGwUEZhXxG","NK0FUCRXFaI","BJCRD5v3JjF","QDHwyFJCxDV","UOKOi2CwivG","jXQYcKFGKiR","CZ1xDj40X3e","xJhzvmtsQnc","QGEDaHFRCRC","uCSoawGlvKG","EHM3CHoIDeo","GodYkDYUQGv","KOpGQwBl5xH","jBIpZKyCT5F","FvsQF"]);
             {"contentUrl":"https://hls8.playmix.uno/hls/filmakinesimp4-f9gx1M12BwC.mp4/master.txt"}
             """;
-        Assert.Equal(master, StreamCatalog.PickMediaUrl(StreamCatalog.MediaUrlsIn(packedHtml)));
+        var packedUrls = StreamCatalog.MediaUrlsIn(packedHtml);
+        Assert.Contains(master, packedUrls);
+        Assert.Contains(
+            "https://srv9.cdnimages2898.shop/hls/ongoru-2026-webdl-tt44147164mp4-Tr4Yz605cMT.mp4/master.txt",
+            packedUrls);
+        Assert.DoesNotContain(
+            "https://srv9.cdnimages2898.shop/hls/ongoru-2026-webdl-tt44147164mp4-Tr4Yz605cMT.mp4/txt/master.txt",
+            packedUrls);
+    }
+
+    [Fact]
+    public void Close_embed_packed_hls_is_decoded_past_playmix()
+    {
+        var decoded = StreamCatalog.DecodePackedPlayerUrl([
+            "RkRMRl", "hRQmRC", "dUZyQn", "V6Wkl3", "YzFJRn", "VnR3Zu", "dVdSbj", "NEMUpN",
+            "RDJUU0", "FIbkpX", "eExyRH", "doR213", "QWprT2", "hYbFE5", "NUZETE", "dDdTBo",
+            "RnhGSm", "92SlhE", "RUUxRn", "ZGNkFE", "RkhsUE", "pGRjI1", "eUV3VF", "BXSHZE",
+            "VzNMa0", "RGSlhv", "RkpiR3", "ZyQlcx", "VGhGRF", "BHRDFY", "SEV1dk", "NsdTVD",
+            "REd6Q1", "h2dmRt", "UTV0bE", "VKakVG", "QkdERT", "FibGpM", "RUJPel", "ZGRzFZ",
+            "WEdYNk", "N2cnNs", "RHVpRn", "ZGR1hP", "NVBZRk", "JaRmpQ", "QUV4em", "NuRnpH",
+            "SWpQck", "J2VEdG", "R3pNRl", "BJaG1R", "OUdGM3", "JORkZu", "UW0xel", "BtTzFY",
+            "V0hMT0", "Z2SnVF", "MlBIRE", "h6QkdR", "aGFJSH", "p4b0ZC", "U21Pen", "RsUFRn",
+            "RDByZ0", "dQVFJK", "M3JHV0", "ZKYkpF", "RWhCTz", "lFQXVo", "WEZGRT", "FGRUpQ",
+            "WUZMQl", "pEMD0="
+        ]);
+        Assert.False(string.IsNullOrWhiteSpace(decoded));
+        Assert.StartsWith("http", decoded, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("playmix.uno", decoded, StringComparison.OrdinalIgnoreCase);
+        var usable = StreamCatalog.LooksImagePlaylistUrl(decoded)
+            ? StreamCatalog.SiblingPlaylistUrl(decoded)
+            : decoded;
+        Assert.False(string.IsNullOrWhiteSpace(usable));
+        Assert.Contains(
+            usable,
+            StreamCatalog.MediaUrlsIn(
+                """
+                var s_Pvw6KqI38V1 = dc_cvNVv97I7Nn(["RkRMRl","hRQmRC","dUZyQn","V6Wkl3","YzFJRn","VnR3Zu","dVdSbj","NEMUpN","RDJUU0","FIbkpX","eExyRH","doR213","QWprT2","hYbFE5","NUZETE","dDdTBo","RnhGSm","92SlhE","RUUxRn","ZGNkFE","RkhsUE","pGRjI1","eUV3VF","BXSHZE","VzNMa0","RGSlhv","RkpiR3","ZyQlcx","VGhGRF","BHRDFY","SEV1dk","NsdTVD","REd6Q1","h2dmRt","UTV0bE","VKakVG","QkdERT","FibGpM","RUJPel","ZGRzFZ","WEdYNk","N2cnNs","RHVpRn","ZGR1hP","NVBZRk","JaRmpQ","QUV4em","NuRnpH","SWpQck","J2VEdG","R3pNRl","BJaG1R","OUdGM3","JORkZu","UW0xel","BtTzFY","V0hMT0","Z2SnVF","MlBIRE","h6QkdR","aGFJSH","p4b0ZC","U21Pen","RsUFRn","RDByZ0","dQVFJK","M3JHV0","ZKYkpF","RWhCTz","lFQXVo","WEZGRT","FGRUpQ","WUZMQl","pEMD0="]);
+                {"contentUrl":"https://hls8.playmix.uno/hls/filmakinesimp4-f9gx1M12BwC.mp4/master.txt"}
+                """));
+    }
+
+    [Fact]
+    public void Close_embed_reads_the_randomized_packer_from_the_page()
+    {
+        const string html =
+            """
+            function dc_SCIIq3Uv5aD(value_parts) {
+              let value = value_parts.join('');
+              let result = value;
+              result = atob(result);
+              result = result.split('').reverse().join('');
+              result = atob(result);
+              result = result.replace(/[a-zA-Z]/g, function(c) {
+                var o = c.charCodeAt(0), base = (o <= 90) ? 65 : 97;
+                return String.fromCharCode((o - base + 16) % 26 + base);
+              });
+              result = result.split('').reverse().join('');
+              result = atob(result);
+              var acc = 7;
+              let unmix = '';
+              for (let i = 0; i < result.length; i++) {
+                var b = result.charCodeAt(i);
+                acc = (acc + 14) % 256;
+                var plain = b ^ acc;
+                acc = (acc + b) % 256;
+                unmix += String.fromCharCode(plain);
+              }
+              return unmix;
+            }
+            var s_BHPz5bnZfOS = dc_SCIIq3Uv5aD(["PT1BY3","VSa001","WTJkaX","BrU1RW","bU5yTV","VPSjUy","TVlaam","NJbDJM","anBXY0","xaRld6","Z2pXd1","ZuYXZJ","MU0zd1","dieG8y","UzN0aV","ZteDJa","dk1XUk","d0aWJ5","TW5USE","pXYzVr","MUxUaG","pXU0p6","S2lkbF","kzVUZV","d3N5TE","lKRE5h","MWtWWT","lXWnh4","R093Wk","RhekYx","ZFY5eU","xNUmxX","cUZsUm","lKbFk1","RjFNVW","RqV2hW","elZhSl","dRNTgy","VE1KMl","QwRjJM","eDFUUA","=="]);
+            {"contentUrl":"https://hls8.playmix.uno/hls/filmakinesimp4-f9gx1M12BwC.mp4/master.txt"}
+            """;
+        var urls = StreamCatalog.MediaUrlsIn(html);
+        Assert.Contains(urls, item => item.Contains("cdnimages", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("https://hls8.playmix.uno/hls/filmakinesimp4-f9gx1M12BwC.mp4/master.txt", urls);
+    }
+
+    [Fact]
+    public void Close_embed_decodes_escaped_parts_and_double_rot()
+    {
+        const string html =
+            """
+            function dc_9SoHdZ0G9CE(value_parts) {
+              let value = value_parts.join('');
+              let result = value;
+              result = result.replace(/[a-zA-Z]/g, function(c) {
+                var o = c.charCodeAt(0), base = (o <= 90) ? 65 : 97;
+                return String.fromCharCode((o - base + 1) % 26 + base);
+              });
+              result = result.replace(/[a-zA-Z]/g, function(c) {
+                var o = c.charCodeAt(0), base = (o <= 90) ? 65 : 97;
+                return String.fromCharCode((o - base + 21) % 26 + base);
+              });
+              result = result.split('').reverse().join('');
+              result = atob(result);
+              var acc = 229;
+              let unmix = '';
+              for (let i = 0; i < result.length; i++) {
+                var b = result.charCodeAt(i);
+                acc = (acc + 16) % 256;
+                var plain = b ^ acc;
+                acc = (acc + b) % 256;
+                unmix += String.fromCharCode(plain);
+              }
+              return unmix;
+            }
+            var s_s6tQjbIa81q = dc_9SoHdZ0G9CE(["==E\/kv","my7\/+9","GEwQ7m","z4Pjqx","VTHxYC","wMPrjO","gSGb8B","gD2K\/u","bPz40T","j8qxv4","tIPKEz","z8OBy5","ud2HkS","9+djFb","cXTXwS","zc3I77","bTjdmB","z8bJuG","m7QLMj","T9BQ4i","\/Oi6wE","5CtyT5","8fhr"]);
+            """;
+        var urls = StreamCatalog.PackedPlayerUrls(html);
+        Assert.True(urls.Count > 0, "escaped slash parts must decode");
+        Assert.Contains(urls, item => item.StartsWith("http", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(urls, item => item.Contains("playmix.uno", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Close_embed_skips_dead_playmix_for_the_packed_master()
+    {
+        const string embed =
+            "https://hdfilmcehennemi.mobi/video/embed/xnZQ9xsXLfb/?rapidrame_id=gr2rb77x3mpm";
+        var html = StreamCatalog.GetText(embed, StreamCatalog.ChromeUa, embed);
+        Assert.False(string.IsNullOrWhiteSpace(html), "embed HTML did not download");
+        var urls = StreamCatalog.MediaUrlsIn(html);
+        var packed = urls.FirstOrDefault(item =>
+            item.Contains("cdnimages", StringComparison.OrdinalIgnoreCase) ||
+            (item.Contains("master.txt", StringComparison.OrdinalIgnoreCase) &&
+             !item.Contains("playmix", StringComparison.OrdinalIgnoreCase)));
+        Assert.False(
+            string.IsNullOrWhiteSpace(packed),
+            "decoded media missing. urls=" + string.Join(" | ", urls) +
+            " packedCalls=" + StreamCatalog.PackedPlayerUrls(html).Count);
+        var master = StreamCatalog.GetText(packed!, StreamCatalog.ChromeUa, embed);
+        Assert.False(string.IsNullOrWhiteSpace(master), "packed master empty: " + packed);
+        Assert.StartsWith("#EXTM3U", master.TrimStart(), StringComparison.OrdinalIgnoreCase);
+
+        var playable = StreamCatalog.Resolve(embed);
+        Assert.NotNull(playable);
+        Assert.DoesNotContain("playmix.uno", playable!.MediaUrl, StringComparison.OrdinalIgnoreCase);
+        Assert.True(StreamCatalog.IsDirectMedia(playable.MediaUrl));
+        Assert.Contains("master.txt", playable.MediaUrl, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(embed, playable.Referer);
+
+        var fromPage = StreamCatalog.Resolve("https://www.hdfilmcehennemi.nl/somebody-2024-hdf/");
+        Assert.NotNull(fromPage);
+        Assert.DoesNotContain("playmix.uno", fromPage!.MediaUrl, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("master.txt", fromPage.MediaUrl, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Jw_caption_tracks_keep_their_english_and_turkish_labels()
+    {
+        const string html =
+            """
+            tracks: [{"file":"https:\/\/hdfilmcehennemi.mobi\/vtt\/xnZQ9xsXLfb-eng.vtt","kind":"captions","label":"English"},{"file":"https:\/\/hdfilmcehennemi.mobi\/vtt\/xnZQ9xsXLfb-tr-4611117-engtr.vtt","kind":"captions","label":"Turkish","default":true}]
+            """;
+        var caps = StreamCatalog.SidecarCaptionsIn(html);
+        Assert.Equal(2, caps.Count);
+        Assert.Contains(caps, item => item.Name == "English" && item.Url.Contains("-eng.vtt", StringComparison.Ordinal));
+        Assert.Contains(caps, item => item.Name == "Turkish" && item.Url.Contains("-tr-", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Dailymotion_metadata_exposes_the_selected_subtitle_file()
+    {
+        using var document = System.Text.Json.JsonDocument.Parse(
+            """
+            {"subtitles":{"enable":true,"data":{
+              "en":{"label":"English","urls":["https://static2.dmcdn.net/en.srt"]},
+              "tr-auto":{"label":"Türkçe (autogenerated)","urls":["https://static2.dmcdn.net/tr-auto.srt"]}
+            }}}
+            """);
+        Assert.Equal(
+            "https://static2.dmcdn.net/tr-auto.srt",
+            StreamCatalog.DailyCaptionUrl(document.RootElement, "tr"));
+        Assert.Equal(
+            "https://static2.dmcdn.net/en.srt",
+            StreamCatalog.DailyCaptionUrl(document.RootElement, "en"));
+        using var chapters = System.Text.Json.JsonDocument.Parse(
+            """
+            {"subtitles":{"enable":true,"data":{
+              "en":{"label":"English","urls":[
+                "https://static2.dmcdn.net/static/video/646967054_chapters.vtt",
+                "https://static2.dmcdn.net/en.srt"
+              ]}
+            }}}
+            """);
+        Assert.Equal(
+            "https://static2.dmcdn.net/en.srt",
+            StreamCatalog.DailyCaptionUrl(chapters.RootElement, "en"));
+        Assert.DoesNotContain(
+            StreamCatalog.DailyCaptionTracks(chapters.RootElement),
+            item => item.Url.Contains("chapters", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Playerjs_html_exposes_every_sidecar_caption()
+    {
+        var html = "window.playerjsSubtitle='[English]https://cdn.example/en.vtt,[Turkish]https://cdn.example/tr.vtt';";
+        var caps = StreamCatalog.SidecarCaptionsIn(html);
+        Assert.Equal(2, caps.Count);
+        Assert.Equal("en", caps[0].Language);
+        Assert.Equal("https://cdn.example/en.vtt", caps[0].Url);
+        Assert.Equal("tr", caps[1].Language);
+        Assert.Equal("https://cdn.example/tr.vtt", caps[1].Url);
+        const string packed =
+            """
+            <script>jwSetup.tracks=[{file:"https://cdn.example/en.vtt",label:"English",kind:"captions"}];</script>
+            """;
+        var fromFile = StreamCatalog.SidecarCaptionsIn(packed);
+        Assert.Contains(fromFile, item => item.Url == "https://cdn.example/en.vtt");
+        var escaped = StreamCatalog.SidecarCaptionsIn(
+            """{"file":"https:\/\/hdfilmcehennemi.mobi\/vtt\/2026\/08\/film-eng.vtt","label":"English"}""");
+        Assert.Contains(escaped, item => item.Url == "https://hdfilmcehennemi.mobi/vtt/2026/08/film-eng.vtt");
+
+        const string imagestoo =
+            """
+            var playerjsDefaultSubtitle = "English";
+            var playerjsSubtitle = "[English]https://i.knitwears.pics/cdn/down/abc/Subtitle/subtitle_eng.vtt,[Turkish]https://i.knitwears.pics/cdn/down/abc/Subtitle/subtitle_tur.vtt";
+            """;
+        var fromPlayerjs = StreamCatalog.SidecarCaptionsIn(imagestoo);
+        Assert.Equal(2, fromPlayerjs.Count);
+        Assert.Equal("en", fromPlayerjs[0].Language);
+        Assert.EndsWith("subtitle_eng.vtt", fromPlayerjs[0].Url);
+        Assert.Equal("tr", fromPlayerjs[1].Language);
+        Assert.EndsWith("subtitle_tur.vtt", fromPlayerjs[1].Url);
+
+        const string cfg =
+            "eyJ2IjoiaHR0cHM6Ly9pbWFnZXN0b28uY29tL3ZpZGVvLzZhODNjNzMxNjYwZmNjOWYxNGUxY2UwYjYyZDQ1ZWI5IiwidCI6ImVtYmVkIn0=";
+        var embeds = StreamCatalog.PlayerEmbedsIn(
+            $"<div class='video-player-container' data-cfg='{cfg}'></div>",
+            "https://dizipal2121.com/bolum/x");
+        Assert.Contains(embeds, item => item.Contains("imagestoo.com/video/6a83c731660fcc9f14e1ce0b62d45eb9", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Knitwears_sidecar_vtts_download_as_captions()
+    {
+        var english = StreamCaptionLoader.LoadSidecar(
+            "https://i.knitwears.pics/cdn/down/0a034306c940f526d8c3465fb177de3b/Subtitle/subtitle_eng.vtt",
+            "en",
+            "English",
+            "https://imagestoo.com/");
+        var turkish = StreamCaptionLoader.LoadSidecar(
+            "https://i.knitwears.pics/cdn/down/0a034306c940f526d8c3465fb177de3b/Subtitle/subtitle_tur.vtt",
+            "tr",
+            "Turkish",
+            "https://imagestoo.com/");
+        Assert.False(string.IsNullOrWhiteSpace(english));
+        Assert.False(string.IsNullOrWhiteSpace(turkish));
+        Assert.True(File.Exists(english));
+        Assert.True(File.Exists(turkish));
+        Assert.Contains("-->", File.ReadAllText(english), StringComparison.Ordinal);
+        Assert.Contains("-->", File.ReadAllText(turkish), StringComparison.Ordinal);
+        Assert.NotEqual(english, turkish);
+    }
+
+    [Fact]
+    public void Hdfilm_turkish_engtr_sidecar_keeps_early_cues()
+    {
+        const string english =
+            "https://hdfilmcehennemi.mobi/vtt/2026/08/xnZQ9xsXLfb-eng-somebody-2024-webdl-tt35899314_subtitles01.eng.vtt";
+        const string turkish =
+            "https://hdfilmcehennemi.mobi/vtt/2026/08/xnZQ9xsXLfb-tr-4611117-somebody-2024-webdl-tt35899314_subtitles01engtr.vtt";
+        const string referer = "https://hdfilmcehennemi.mobi/video/embed/xnZQ9xsXLfb/?rapidrame_id=gr2rb77x3mpm";
+        var enFile = StreamCaptionLoader.LoadSidecar(english, "en", "English", referer);
+        var trFile = StreamCaptionLoader.LoadSidecar(turkish, "tr", "Turkish", referer);
+        Assert.False(string.IsNullOrWhiteSpace(enFile), "english sidecar missing");
+        Assert.False(string.IsNullOrWhiteSpace(trFile), "turkish sidecar missing");
+        var enPlay = File.ReadAllText(StreamCaptionLoader.PlayPath(enFile!));
+        var trPlay = File.ReadAllText(StreamCaptionLoader.PlayPath(trFile!));
+        var enDoc = SrtDocument.Parse(enPlay, compact: false);
+        var trDoc = SrtDocument.Parse(trPlay, compact: false);
+        Assert.True(enDoc.Cues.Count > 10, "english cues=" + enDoc.Cues.Count);
+        Assert.True(trDoc.Cues.Count > 10, "turkish cues=" + trDoc.Cues.Count + " play=" + StreamCaptionLoader.PlayPath(trFile));
+        Assert.True(
+            trDoc.Cues[0].Start < TimeSpan.FromMinutes(5),
+            "turkish first cue is " + trDoc.Cues[0].Start + " text=" + trDoc.Cues[0].Text);
+        Assert.Contains("SOMEBODY", enDoc.Cues[0].Text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Breaking_bad_turkish_sidecar_parses_cues_like_english()
+    {
+        const string page = "https://www.hdfilmcehennemi.now/bolum/breaking-bad-1-sezon-1-bolum-1-izle-16/";
+        var html = StreamCatalog.GetText(page, StreamCatalog.ChromeUa, page);
+        Assert.False(string.IsNullOrWhiteSpace(html), "page html empty");
+        var fields = StreamCatalog.WordPressAjaxPlayerFields(html, page);
+        var embeds = StreamCatalog.AjaxPlayerEmbeds(html ?? "", page);
+        var local = StreamCatalog.SidecarCaptionsIn(html);
+        var caps = StreamCatalog.SidecarCaptionsFromPage(page);
+        Assert.False(fields is null, "wordpress ajax player fields missing");
+        Assert.Contains("SetPlay", fields!.Value.Players, StringComparer.OrdinalIgnoreCase);
+        Assert.Contains(embeds, item => item.Contains("setplay.", StringComparison.OrdinalIgnoreCase));
+        Assert.True(local.Count == 0, "static episode HTML has no VTT; Open must transfer JW sidecar files");
+    }
+
+    [Fact]
+    public void Dizipal_episode_page_follows_the_embed_to_english_and_turkish_vtts()
+    {
+        var caps = StreamCatalog.SidecarCaptionsFromPage(
+            "https://dizipal2121.com/bolum/yuzuklerin-efendisi-guc-yuzukleri-1-sezon-6-bolum");
+        Assert.True(caps.Count >= 2, "expected Eng/TR sidecars from the imagestoo embed");
+        Assert.Contains(caps, item => item.Url.Contains("subtitle_eng.vtt", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(caps, item => item.Url.Contains("subtitle_tur.vtt", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Caption_referer_follows_the_caption_host_not_youtube()
+    {
+        Assert.Equal("https://www.youtube.com/", YouTubeCatalog.CaptionReferer("https://www.youtube.com/api/timedtext?v=x"));
+        Assert.Equal("https://i.knitwears.pics/", YouTubeCatalog.CaptionReferer("https://i.knitwears.pics/cdn/down/abc/Subtitle/subtitle_tur.vtt"));
     }
 
     [Fact]

@@ -8,6 +8,110 @@ public static class StreamCaptionLoader
     // untouched because the user may have edited them in the subtitle browser.
     public static string CacheDirectory => Path.Combine(Path.GetTempPath(), "GrokPlayer", "captions-v3");
 
+    public static string? LoadSidecar(string url, string? language = null, string? name = null, string? referer = null)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return null;
+        }
+
+        if (File.Exists(url))
+        {
+            return url;
+        }
+
+        if (Uri.TryCreate(url, UriKind.Absolute, out var local) && local.IsFile && File.Exists(local.LocalPath))
+        {
+            return local.LocalPath;
+        }
+
+        var host = YouTubeCatalog.CaptionReferer(url);
+        string? text = null;
+        var parsed = new SrtDocument();
+        foreach (var tryReferer in new[] { host, referer, null })
+        {
+            var bytes = YouTubeCatalog.DownloadCaption(url, tryReferer);
+            text = DecodeCaptionBytes(bytes);
+            parsed = LooksLikeSidecar(text) ? SrtDocument.Parse(text, compact: false) : new SrtDocument();
+            if (parsed.Cues.Count > 0)
+            {
+                break;
+            }
+        }
+
+        if (parsed.Cues.Count == 0)
+        {
+            return null;
+        }
+
+        var lang = MediaLanguage.Normalize(language);
+        if (lang.Length == 0 || MediaLanguage.IsOriginal(lang))
+        {
+            lang = MediaLanguage.FromName(name);
+        }
+
+        if (lang.Length == 0)
+        {
+            lang = MediaLanguage.Normalize(YouTubeCatalog.CaptionLanguageFromUrl(url));
+        }
+
+        if (lang.Length == 0 || MediaLanguage.IsOriginal(lang))
+        {
+            lang = "auto";
+        }
+
+        var folder = CacheDirectory;
+        Directory.CreateDirectory(folder);
+        var stem = "sidecar-" + Math.Abs(url.GetHashCode(StringComparison.Ordinal))
+            .ToString("x", System.Globalization.CultureInfo.InvariantCulture);
+        var vtt = Path.Combine(folder, stem + "." + lang + ".vtt");
+        WriteSrt(vtt, text!);
+        return vtt;
+    }
+
+    public static string PlaySidecar(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return "";
+        }
+
+        var vtt = path.EndsWith(".vtt", StringComparison.OrdinalIgnoreCase)
+            ? path
+            : Path.ChangeExtension(path, ".vtt");
+        return File.Exists(vtt) ? vtt : PlayPath(path);
+    }
+
+    private static string DecodeCaptionBytes(byte[]? bytes)
+    {
+        if (bytes is not { Length: > 15 })
+        {
+            return "";
+        }
+
+        var utf8 = SrtDocument.LoadText(bytes);
+        var utf8Cues = LooksLikeSidecar(utf8) ? SrtDocument.Parse(utf8, compact: false).Cues.Count : 0;
+        if (utf8Cues > 0 && !utf8.Contains('\uFFFD', StringComparison.Ordinal))
+        {
+            return utf8;
+        }
+
+        try
+        {
+            var turkish = System.Text.Encoding.GetEncoding(1254).GetString(bytes);
+            var turkishCues = LooksLikeSidecar(turkish) ? SrtDocument.Parse(turkish, compact: false).Cues.Count : 0;
+            if (turkishCues > utf8Cues)
+            {
+                return turkish;
+            }
+        }
+        catch (Exception)
+        {
+        }
+
+        return utf8;
+    }
+
     public static string? Load(string? videoId, string? language, string? captionUrl)
     {
         if (MediaLanguage.IsOff(language))
@@ -30,7 +134,7 @@ public static class StreamCaptionLoader
             return cached;
         }
 
-        var stem = string.IsNullOrWhiteSpace(videoId) ? "stream" : videoId;
+        var stem = CacheStem(videoId);
         var rawPath = Path.Combine(folder, stem + "." + tag + ".vtt");
         var translating = IsTranslateRequest(want, captionUrl);
         var urls = Urls(videoId, want, captionUrl);
@@ -110,14 +214,28 @@ public static class StreamCaptionLoader
         }
 
         var folder = CacheDirectory;
-        var srt = Path.Combine(folder, videoId + "." + tag + ".srt");
+        var stem = CacheStem(videoId);
+        var srt = Path.Combine(folder, stem + "." + tag + ".srt");
         if (File.Exists(srt) && new FileInfo(srt).Length > 8)
         {
             return srt;
         }
 
-        var vtt = Path.Combine(folder, videoId + "." + tag + ".vtt");
+        var vtt = Path.Combine(folder, stem + "." + tag + ".vtt");
         return File.Exists(vtt) && new FileInfo(vtt).Length > 8 ? vtt : null;
+    }
+
+    internal static string CacheStem(string? videoId)
+    {
+        if (string.IsNullOrWhiteSpace(videoId))
+        {
+            return "stream";
+        }
+
+        var invalid = Path.GetInvalidFileNameChars();
+        var chars = videoId.Trim().Select(symbol => invalid.Contains(symbol) ? '-' : symbol).ToArray();
+        var stem = new string(chars).Trim('-');
+        return stem.Length == 0 ? "stream" : stem;
     }
 
     internal static string CacheTag(string? language, string? captionUrl)
@@ -405,6 +523,11 @@ public static class StreamCaptionLoader
         text.Contains("WEBVTT", StringComparison.OrdinalIgnoreCase) ||
         text.Contains("-->", StringComparison.Ordinal) ||
         YouTubeTimedText.LooksLike(text);
+
+    internal static bool LooksLikeSidecar(string text) =>
+        !string.IsNullOrWhiteSpace(text) &&
+        !text.Contains("<html", StringComparison.OrdinalIgnoreCase) &&
+        LooksLikeCaptions(text);
 
     internal static string WriteSrt(string vttPath, string text)
     {

@@ -206,6 +206,66 @@ public sealed class YouTubeCatalogTests
         Assert.True(ExternalOpen.TryParse(asr, out var asrOpen));
         Assert.Equal("en:asr", asrOpen.SubLang);
         Assert.Contains("kind=asr", asrOpen.CaptionUrl, StringComparison.Ordinal);
+        Assert.Single(asrOpen.Captions);
+        Assert.Equal(asrOpen.CaptionUrl, asrOpen.Captions[0].Url);
+    }
+
+    [Fact]
+    public void Extension_protocol_keeps_youtube_caption_and_adds_cap_list()
+    {
+        var english = "https://cdn.example/en.vtt";
+        var turkish = "https://cdn.example/tr.vtt";
+        var link = ExternalOpen.ToProtocol(
+            "https://cdn.example/master.m3u8",
+            "Episode",
+            StreamKind.Vod,
+            captions:
+            [
+                new ExternalCaption("en", english, "English"),
+                new ExternalCaption("tr", turkish, "Turkish")
+            ]);
+        Assert.Contains("cap=", link, StringComparison.Ordinal);
+        Assert.True(ExternalOpen.TryParse(link, out var open));
+        Assert.Equal("https://cdn.example/master.m3u8", open.Url);
+        Assert.Equal(2, open.Captions.Count);
+        Assert.Equal("en", open.Captions[0].Language);
+        Assert.Equal(english, open.Captions[0].Url);
+        Assert.Equal("English", open.Captions[0].Name);
+        Assert.Equal("tr", open.Captions[1].Language);
+        Assert.Equal(turkish, open.Captions[1].Url);
+        Assert.True(ExternalOpen.TryParse(
+            ExternalOpen.ToProtocol(
+                "https://www.youtube.com/watch?v=dQw4w9wgBcQ",
+                "Song",
+                StreamKind.Vod,
+                "tr",
+                "tr",
+                captionUrl: "https://www.youtube.com/api/timedtext?v=dQw4w9wgBcQ&lang=tr"),
+            out var youtube));
+        Assert.Equal("tr", youtube.AudioLang);
+        Assert.Equal("tr", youtube.SubLang);
+        Assert.Contains("timedtext", youtube.CaptionUrl, StringComparison.Ordinal);
+        Assert.Single(youtube.Captions);
+        Assert.False(YouTubeCatalog.LooksLikeYouTubeCaptionUrl("https://i.knitwears.pics/cdn/down/abc/Subtitle/subtitle_eng.vtt"));
+        Assert.True(YouTubeCatalog.LooksLikeYouTubeCaptionUrl("https://www.youtube.com/api/timedtext?v=x&lang=en"));
+    }
+
+    [Fact]
+    public void Sidecar_loader_keeps_unlabeled_vtt_files()
+    {
+        var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".vtt");
+        File.WriteAllText(path, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHi\n");
+        try
+        {
+            Assert.Equal(path, StreamCaptionLoader.LoadSidecar(path, "und", "English"));
+            Assert.Equal(path, StreamCaptionLoader.LoadSidecar(path, "", ""));
+            Assert.Equal("dailymotion-xap6qz2", StreamCaptionLoader.CacheStem("dailymotion|xap6qz2"));
+            Assert.DoesNotContain("|", StreamCaptionLoader.CacheStem("sidecar|68a43e2f"), StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
     }
 
     [Fact]
@@ -273,6 +333,8 @@ public sealed class YouTubeCatalogTests
         Assert.True(YouTubeCatalog.CaptionUrlMatches("https://www.youtube.com/api/timedtext?v=x&lang=en&tlang=tr&fmt=vtt", "tr"));
         Assert.False(YouTubeCatalog.CaptionUrlMatches("https://www.youtube.com/api/timedtext?v=x&lang=ar&fmt=vtt", "en"));
         Assert.True(MediaLanguage.Matches("en", "eng"));
+        Assert.True(MediaLanguage.Matches("tr", "tur"));
+        Assert.True(MediaLanguage.Matches("de", "ger"));
         Assert.True(MediaLanguage.Matches("en", "English"));
         Assert.True(MediaLanguage.Matches("en", YouTubeCatalog.CaptionLanguageHeader("WEBVTT\nLanguage: English\n")));
     }

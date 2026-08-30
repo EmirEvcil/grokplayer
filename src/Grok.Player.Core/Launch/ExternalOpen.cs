@@ -4,7 +4,7 @@ namespace Grok.Player.Core.Launch;
 
 public sealed class ExternalOpen
 {
-    public ExternalOpen(string url, string? title = null, StreamKind kind = StreamKind.Unknown, bool play = true, string? audioLang = null, string? subLang = null, int height = 0, string? captionUrl = null, string? referer = null, double? durationSeconds = null, string? soundtrack = null)
+    public ExternalOpen(string url, string? title = null, StreamKind kind = StreamKind.Unknown, bool play = true, string? audioLang = null, string? subLang = null, int height = 0, string? captionUrl = null, string? referer = null, double? durationSeconds = null, string? soundtrack = null, IReadOnlyList<ExternalCaption>? captions = null)
     {
         Url = url;
         Title = title;
@@ -17,6 +17,7 @@ public sealed class ExternalOpen
         Referer = referer;
         DurationSeconds = durationSeconds is > 0 and < 604800 ? durationSeconds : null;
         Soundtrack = string.IsNullOrWhiteSpace(soundtrack) ? null : soundtrack.Trim();
+        Captions = captions ?? [];
     }
 
     public string Url { get; }
@@ -35,6 +36,8 @@ public sealed class ExternalOpen
     public double? DurationSeconds { get; }
 
     public string? Soundtrack { get; }
+
+    public IReadOnlyList<ExternalCaption> Captions { get; }
 
     public static bool TryParse(string? raw, out ExternalOpen open)
     {
@@ -59,7 +62,7 @@ public sealed class ExternalOpen
         return false;
     }
 
-    public static string ToProtocol(string url, string? title = null, StreamKind kind = StreamKind.Unknown, string? audioLang = null, string? subLang = null, int height = 0, string? captionUrl = null, string? referer = null, double? durationSeconds = null, string? soundtrack = null)
+    public static string ToProtocol(string url, string? title = null, StreamKind kind = StreamKind.Unknown, string? audioLang = null, string? subLang = null, int height = 0, string? captionUrl = null, string? referer = null, double? durationSeconds = null, string? soundtrack = null, IEnumerable<ExternalCaption>? captions = null)
     {
         var query = "url=" + Uri.EscapeDataString(url);
         if (!string.IsNullOrWhiteSpace(title))
@@ -107,6 +110,14 @@ public sealed class ExternalOpen
             query += "&sound=" + Uri.EscapeDataString(soundtrack);
         }
 
+        foreach (var caption in captions ?? [])
+        {
+            if (!string.IsNullOrWhiteSpace(caption.Url))
+            {
+                query += "&cap=" + Uri.EscapeDataString(caption.ToToken());
+            }
+        }
+
         return "grokplayer://open?" + query;
     }
 
@@ -137,6 +148,7 @@ public sealed class ExternalOpen
         string? captionUrl = null;
         string? referer = null;
         string? soundtrack = null;
+        var captions = new List<ExternalCaption>();
         var kind = StreamKind.Unknown;
         var play = true;
         var height = 0;
@@ -204,6 +216,14 @@ public sealed class ExternalOpen
             {
                 soundtrack = string.IsNullOrWhiteSpace(value) ? null : value.Trim();
             }
+            else if (name is "cap" or "caps")
+            {
+                var parsed = ExternalCaption.TryParse(value);
+                if (parsed is not null)
+                {
+                    captions.Add(parsed);
+                }
+            }
         }
 
         if (string.IsNullOrWhiteSpace(url))
@@ -211,7 +231,12 @@ public sealed class ExternalOpen
             return false;
         }
 
-        open = new ExternalOpen(url, title, kind, play, audioLang, subLang, height, captionUrl, referer, durationSeconds, soundtrack);
+        if (captions.Count == 0 && !string.IsNullOrWhiteSpace(captionUrl))
+        {
+            captions.Add(new ExternalCaption(subLang ?? "", captionUrl, subLang ?? "Subtitle"));
+        }
+
+        open = new ExternalOpen(url, title, kind, play, audioLang, subLang, height, captionUrl, referer, durationSeconds, soundtrack, captions);
         return true;
     }
 }

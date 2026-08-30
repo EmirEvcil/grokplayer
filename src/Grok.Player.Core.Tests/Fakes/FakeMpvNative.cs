@@ -69,6 +69,12 @@ public sealed class FakeMpvNative : IMpvNative
         {
             HandleLoad(args[1]);
         }
+        else if (args[0] == "sub-add" && args.Length >= 2)
+        {
+            var index = (int)(GetPropertyLong("track-list/count") ?? 0);
+            SeedTrack(index, "sub", index + 1, "", Path.GetFileName(args[1]), true, external: true);
+            Seed("track-list/" + index + "/external-filename", args[1]);
+        }
         else if (args[0] == "stop")
         {
             HandleStop();
@@ -150,6 +156,23 @@ public sealed class FakeMpvNative : IMpvNative
     }
 
     public void Seed(string name, object value) => _properties[name] = value;
+
+    public void SeedTrack(int index, string type, long id, string language, string title, bool selected, bool external = false)
+    {
+        var count = GetPropertyLong("track-list/count") ?? 0;
+        if (index >= count)
+        {
+            Seed("track-list/count", (long)(index + 1));
+        }
+
+        var prefix = "track-list/" + index + "/";
+        Seed(prefix + "type", type);
+        Seed(prefix + "id", id);
+        Seed(prefix + "lang", language);
+        Seed(prefix + "title", title);
+        Seed(prefix + "selected", selected);
+        Seed(prefix + "external", external);
+    }
 
     public void Enqueue(MpvEvent ev) => _events.Enqueue(ev);
 
@@ -234,11 +257,44 @@ public sealed class FakeMpvNative : IMpvNative
         Enqueue(new MpvEvent { Id = MpvEventId.PlaybackRestart });
     }
 
+    private void SyncTrackSelection(string type, object value)
+    {
+        var text = value?.ToString() ?? "";
+        if (text is "auto")
+        {
+            return;
+        }
+
+        var off = text.Length == 0 || text is "no" or "false";
+        long? want = null;
+        if (!off && long.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var id))
+        {
+            want = id;
+        }
+
+        var count = GetPropertyLong("track-list/count") ?? 0;
+        for (var i = 0; i < count; i++)
+        {
+            var prefix = "track-list/" + i + "/";
+            if (!string.Equals(GetPropertyString(prefix + "type"), type, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            _properties[prefix + "selected"] = !off && GetPropertyLong(prefix + "id") == want;
+        }
+    }
+
     private void SetProperty(string name, object value, MpvFormat format)
     {
         EnsureAlive();
         _properties[name] = value;
         Lifecycle.Add($"property:{name}={value}");
+        if (name is "aid" or "sid")
+        {
+            SyncTrackSelection(name == "aid" ? "audio" : "sub", value);
+        }
+
         if (_observed.Contains(name))
         {
             Enqueue(MpvEvent.Property(name, value, format));

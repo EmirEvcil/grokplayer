@@ -5,6 +5,16 @@ using SkiaSharp;
 using System.Diagnostics;
 
 var url = args.Length > 0 ? args[0] : "https://www.youtube.com/watch?v=WFSdNlLtu7I";
+if (args.Length > 0 && args[0] == "overlay-check")
+{
+    using var host = PlayerHost.CreateHeadless();
+    host.SetAssOverlay("{\\an2\\bord2.5}METAMFETAMİN BASKINI");
+    host.ProcessPendingEvents();
+    host.SetAssOverlay(null);
+    host.ProcessPendingEvents();
+    Console.WriteLine("overlay-check ok");
+    return 0;
+}
 if (args.Length > 0 && args[0] == "transfer")
     return TransferEndurance.Run(args);
 if (args.Length > 1 && args[0] == "catalog")
@@ -48,6 +58,335 @@ if (args.Length > 1 && args[0] == "catalog-app")
         Console.WriteLine($"afterSeek={host.Position} state={host.State}");
     }
     return host.Duration?.TotalMinutes > 5 ? 0 : 3;
+}
+if (args.Length > 0 && args[0] == "hdfilm-attach")
+{
+    var page = args.Length > 1 ? args[1] : "https://www.hdfilmcehennemi.now/bolum/breaking-bad-1-sezon-1-bolum-1-izle-16/";
+    var resolved = StreamCatalog.Resolve(page);
+    if (resolved is null)
+    {
+        Console.WriteLine("RESOLVE_NULL");
+        return 2;
+    }
+
+    var harvested = Grok.Player.Core.Media.HlsCaptions.LoadAll(resolved.MediaUrl, resolved.UserAgent, resolved.MediaUrl);
+    Console.WriteLine("harvest=" + harvested.Count);
+    if (harvested.Count == 0)
+    {
+        return 3;
+    }
+
+    var vtt = harvested[0].File;
+    Console.WriteLine("vtt=" + vtt + " bytes=" + new FileInfo(vtt).Length);
+
+    using var host = PlayerHost.CreateHeadless();
+    host.Open(
+        resolved.MediaUrl,
+        resolved.Kind,
+        title: resolved.Title,
+        userAgent: resolved.UserAgent,
+        referer: resolved.Referer,
+        formatHint: resolved.FormatHint,
+        httpHeaders: resolved.HttpHeaders,
+        subFile: vtt);
+    var until = DateTime.UtcNow.AddSeconds(35);
+    while (DateTime.UtcNow < until &&
+           (host.State is not (PlayerState.Playing or PlayerState.Paused) || host.Duration?.TotalSeconds < 300))
+    {
+        host.ProcessPendingEvents();
+        if (host.State == PlayerState.Error)
+        {
+            break;
+        }
+
+        Thread.Sleep(50);
+    }
+
+    Console.WriteLine("open-with-sub state=" + host.State + " duration=" + host.Duration + " sid=" + host.GetMpvString("sid") + " ext=" + string.Join(",", host.ListTracks("sub").Select(track => track.Id + ":" + track.External + ":" + track.Title)));
+    host.Seek(TimeSpan.FromMinutes(12) + TimeSpan.FromSeconds(1));
+    var wait = DateTime.UtcNow.AddSeconds(8);
+    while (DateTime.UtcNow < wait && string.IsNullOrWhiteSpace(host.GetMpvString("sub-text")))
+    {
+        host.ProcessPendingEvents();
+        Thread.Sleep(80);
+    }
+
+    Console.WriteLine("pending-text=[" + (host.GetMpvString("sub-text") ?? "").Replace('\n', ' ') + "] sid=" + host.GetMpvString("sid"));
+
+    host.Pause();
+    host.ProcessPendingEvents();
+    Console.WriteLine("paused-set=" + host.SetSubtitleFile(vtt) + " sid=" + host.GetMpvString("sid") + " suberr=" + host.LastSubtitleError);
+    wait = DateTime.UtcNow.AddSeconds(6);
+    while (DateTime.UtcNow < wait && string.IsNullOrWhiteSpace(host.GetMpvString("sub-text")))
+    {
+        host.ProcessPendingEvents();
+        Thread.Sleep(80);
+    }
+
+    Console.WriteLine("paused-text=[" + (host.GetMpvString("sub-text") ?? "").Replace('\n', ' ') + "] tracks=" + string.Join(",", host.ListTracks("sub").Select(track => track.Id + ":" + track.External + ":" + track.Selected + ":" + track.Title)));
+
+    using var view = new Grok.Player.Core.Presentation.PlaybackViewModel(host);
+    view.AddStream(
+        Grok.Player.Core.Launch.ExternalOpen.ToProtocol(
+            page,
+            resolved.Title,
+            resolved.Kind,
+            referer: resolved.Referer,
+            captions:
+            [
+                new Grok.Player.Core.Launch.ExternalCaption(harvested[0].Language, harvested[0].File, harvested[0].Name),
+                harvested.Count > 1
+                    ? new Grok.Player.Core.Launch.ExternalCaption(harvested[1].Language, harvested[1].File, harvested[1].Name)
+                    : new Grok.Player.Core.Launch.ExternalCaption("en", harvested[0].File, "English")
+            ]),
+        play: true,
+        resolved.Title);
+    var waitCaps = DateTime.UtcNow.AddSeconds(8);
+    while (DateTime.UtcNow < waitCaps)
+    {
+        host.ProcessPendingEvents();
+        Thread.Sleep(40);
+    }
+
+    host.Seek(TimeSpan.FromMinutes(12) + TimeSpan.FromSeconds(1));
+    wait = DateTime.UtcNow.AddSeconds(4);
+    while (DateTime.UtcNow < wait)
+    {
+        host.ProcessPendingEvents();
+        Thread.Sleep(40);
+    }
+
+    for (var i = 0; i < 6; i++)
+    {
+        view.CycleSubtitle();
+        host.ProcessPendingEvents();
+        Console.WriteLine("view " + view.SubtitleTrackLabel + " osd=[" + (view.OnScreenCaption ?? "").Replace('\n', ' ') + "]");
+        if ((view.OnScreenCaption ?? "").Length > 0)
+        {
+            break;
+        }
+    }
+
+    return 0;
+}
+if (args.Length > 0 && args[0] == "hdfilm-subs")
+{
+    var page = args.Length > 1 ? args[1] : "https://www.hdfilmcehennemi.now/bolum/breaking-bad-1-sezon-1-bolum-1-izle-16/";
+    Console.WriteLine("page=" + page);
+    var resolved = StreamCatalog.Resolve(page);
+    if (resolved is null)
+    {
+        Console.WriteLine("RESOLVE_NULL");
+        return 2;
+    }
+
+    Console.WriteLine("media=" + resolved.MediaUrl);
+    Console.WriteLine("referer=" + resolved.Referer);
+    Console.WriteLine("title=" + resolved.Title);
+    var caps = StreamCatalog.SidecarCaptionsFromPage(page);
+    Console.WriteLine("pageCaps=" + caps.Count);
+    foreach (var cap in caps)
+    {
+        Console.WriteLine("  cap " + cap.Language + " " + cap.Name + " " + cap.Url);
+    }
+
+    var harvestWatch = Stopwatch.StartNew();
+    var harvested = Grok.Player.Core.Media.HlsCaptions.LoadAll(resolved.MediaUrl, resolved.UserAgent, resolved.MediaUrl);
+    Console.WriteLine("harvest=" + harvested.Count + " ms=" + harvestWatch.ElapsedMilliseconds);
+    foreach (var item in harvested)
+    {
+        var body = File.ReadAllText(item.File);
+        var cues = Grok.Player.Core.Subtitles.SrtDocument.Parse(body, compact: false).Cues;
+        var around = cues.FirstOrDefault(cue => cue.Start >= TimeSpan.FromMinutes(12) && cue.Start < TimeSpan.FromMinutes(13));
+        Console.WriteLine(
+            "  file " + item.Name + " lang=" + item.Language +
+            " cues=" + cues.Count +
+            " at12=[" + (around?.Text ?? "").Replace('\n', ' ') + "]" +
+            " path=" + item.File);
+    }
+
+    using var host = PlayerHost.CreateHeadless();
+    using var view = new Grok.Player.Core.Presentation.PlaybackViewModel(host);
+    view.AddStream(
+        Grok.Player.Core.Launch.ExternalOpen.ToProtocol(
+            page,
+            resolved.Title,
+            resolved.Kind,
+            referer: resolved.Referer,
+            captions: caps),
+        play: true,
+        resolved.Title);
+
+    var until = DateTime.UtcNow.AddSeconds(40);
+    while (DateTime.UtcNow < until)
+    {
+        host.ProcessPendingEvents();
+        if ((host.State is PlayerState.Playing or PlayerState.Paused) && host.Duration?.TotalSeconds > 300)
+        {
+            break;
+        }
+
+        if (host.State == PlayerState.Error)
+        {
+            break;
+        }
+
+        Thread.Sleep(50);
+    }
+
+    Console.WriteLine("state=" + host.State + " duration=" + host.Duration + " error=" + host.LastError);
+    var harvestUntil = DateTime.UtcNow.AddSeconds(20);
+    while (DateTime.UtcNow < harvestUntil)
+    {
+        host.ProcessPendingEvents();
+        Thread.Sleep(50);
+    }
+
+    host.Seek(TimeSpan.FromMinutes(12));
+    var seekUntil = DateTime.UtcNow.AddSeconds(8);
+    while (DateTime.UtcNow < seekUntil)
+    {
+        host.ProcessPendingEvents();
+        Thread.Sleep(50);
+    }
+
+    Console.WriteLine("pos=" + host.Position);
+    var audios = host.ListTracks("audio");
+    Console.WriteLine("audios=" + audios.Count);
+    foreach (var track in audios)
+    {
+        Console.WriteLine("  audio id=" + track.Id + " lang=" + track.Language + " title=" + track.Title + " sel=" + track.Selected);
+    }
+
+    var tracks = host.ListTracks("sub");
+    Console.WriteLine("subs=" + tracks.Count);
+    foreach (var track in tracks)
+    {
+        Console.WriteLine("  sub id=" + track.Id + " lang=" + track.Language + " title=" + track.Title + " sel=" + track.Selected + " ext=" + track.External);
+    }
+
+    Console.WriteLine("label0=" + view.SubtitleTrackLabel);
+    var pickedTurkce = false;
+    for (var i = 0; i < 8; i++)
+    {
+        view.CycleSubtitle();
+        host.ProcessPendingEvents();
+        Thread.Sleep(400);
+        host.ProcessPendingEvents();
+        var text = host.GetMpvString("sub-text") ?? "";
+        Console.WriteLine(
+            "cycle=" + view.SubtitleTrackLabel +
+            " sid=" + host.GetMpvString("sid") +
+            " stitle=" + host.GetMpvString("current-tracks/sub/title") +
+            " slang=" + host.GetMpvString("current-tracks/sub/lang") +
+            " vis=" + host.GetMpvString("sub-visibility") +
+            " text=[" + text.Replace('\n', ' ') + "]");
+        if (view.SubtitleTrackLabel.Contains("Türkçe", StringComparison.OrdinalIgnoreCase) ||
+            view.SubtitleTrackLabel.Contains("Turkish", StringComparison.OrdinalIgnoreCase))
+        {
+            pickedTurkce = true;
+            break;
+        }
+    }
+
+    if (!pickedTurkce)
+    {
+        Console.WriteLine("NO_TURKCE_CHOICE");
+        return 4;
+    }
+
+    if (harvested.Count > 0)
+    {
+        var play = Grok.Player.Core.Subtitles.StreamCaptionLoader.PlaySidecar(harvested[0].File);
+        Console.WriteLine("direct-file=" + harvested[0].File + " exists=" + File.Exists(harvested[0].File));
+        Console.WriteLine("direct-play=" + play + " exists=" + File.Exists(play));
+        Console.WriteLine("direct-srt-set=" + host.SetSubtitleFile(harvested[0].File));
+        host.ProcessPendingEvents();
+        Thread.Sleep(400);
+        host.ProcessPendingEvents();
+        Console.WriteLine(
+            "srt sid=" + host.GetMpvString("sid") +
+            " text=[" + (host.GetMpvString("sub-text") ?? "").Replace('\n', ' ') + "]");
+        Console.WriteLine("direct-set=" + host.SetSubtitleFile(play));
+        host.ProcessPendingEvents();
+        Thread.Sleep(400);
+        host.ProcessPendingEvents();
+        Console.WriteLine(
+            "direct sid=" + host.GetMpvString("sid") +
+            " ext=" + string.Join(",", host.ListTracks("sub").Select(track => track.Id + ":" + track.External + ":" + track.Title)) +
+            " text=[" + (host.GetMpvString("sub-text") ?? "").Replace('\n', ' ') + "]");
+    }
+
+    foreach (var seconds in new[] { 12 * 60 + 1, 12 * 60 + 4, 12 * 60 + 10, 12 * 60 + 20, 12 * 60 + 40 })
+    {
+        host.Seek(TimeSpan.FromSeconds(seconds));
+        var wait = DateTime.UtcNow.AddSeconds(6);
+        string sample = "";
+        while (DateTime.UtcNow < wait)
+        {
+            host.ProcessPendingEvents();
+            sample = host.GetMpvString("sub-text") ?? "";
+            if (!string.IsNullOrWhiteSpace(sample))
+            {
+                break;
+            }
+
+            Thread.Sleep(80);
+        }
+
+        Console.WriteLine(
+            "at=" + host.Position +
+            " sid=" + host.GetMpvString("sid") +
+            " stitle=" + host.GetMpvString("current-tracks/sub/title") +
+            " text=[" + sample.Replace('\n', ' ') + "]");
+    }
+
+    Console.WriteLine("codec=" + host.GetMpvString("current-tracks/sub/codec"));
+    Console.WriteLine("decoder=" + host.GetMpvString("current-tracks/sub/decoder-desc"));
+    Console.WriteLine("ass=[" + (host.GetMpvString("sub-text/ass") ?? "").Replace('\n', ' ') + "]");
+    try
+    {
+        using var http = new System.Net.Http.HttpClient();
+        http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "Mozilla/5.0 GrokPlayer/1.0");
+        if (!string.IsNullOrWhiteSpace(resolved.Referer))
+        {
+            http.DefaultRequestHeaders.TryAddWithoutValidation("Referer", resolved.Referer);
+        }
+
+        var master = http.GetStringAsync(resolved.MediaUrl).GetAwaiter().GetResult();
+        foreach (var line in master.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
+        {
+            if (line.Contains("TYPE=SUBTITLES", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains(".vtt", StringComparison.OrdinalIgnoreCase) ||
+                line.Contains("tur", StringComparison.OrdinalIgnoreCase) && line.StartsWith('#'))
+            {
+                Console.WriteLine("hls " + line);
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine("hls-error=" + ex.Message);
+    }
+
+    host.Seek(TimeSpan.FromMinutes(12));
+    host.Play();
+    var playUntil = DateTime.UtcNow.AddSeconds(18);
+    var last = "";
+    while (DateTime.UtcNow < playUntil)
+    {
+        host.ProcessPendingEvents();
+        var now = host.GetMpvString("sub-text") ?? "";
+        if (now != last)
+        {
+            Console.WriteLine("play " + host.Position + " [" + now.Replace('\n', ' ') + "]");
+            last = now;
+        }
+
+        Thread.Sleep(80);
+    }
+
+    return 0;
 }
 if (args.Length > 0 && args[0] == "ytdiag")
 {

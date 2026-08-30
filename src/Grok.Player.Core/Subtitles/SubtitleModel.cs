@@ -314,6 +314,17 @@ public sealed class SubtitleModel
         Changed?.Invoke(SubtitleNotify.Track);
     }
 
+    public void ClearRememberedOff()
+    {
+        if (_media is null)
+        {
+            _offForMedia.Clear();
+            return;
+        }
+
+        _offForMedia.Remove(_media);
+    }
+
     public void Disable() => Disable(rememberOff: true);
 
     public void Disable(bool rememberOff)

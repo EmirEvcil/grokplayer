@@ -614,7 +614,9 @@ public static class YouTubeCatalog
         }
     }
 
-    public static byte[]? DownloadCaption(string url)
+    public static byte[]? DownloadCaption(string url) => DownloadCaption(url, null);
+
+    public static byte[]? DownloadCaption(string url, string? referer)
     {
         if (string.IsNullOrWhiteSpace(url))
         {
@@ -631,6 +633,11 @@ public static class YouTubeCatalog
             return File.ReadAllBytes(uri.LocalPath);
         }
 
+        if (!LooksLikeYouTubeCaptionUrl(url))
+        {
+            return GetCaptionBytes(url, referer);
+        }
+
         foreach (var candidate in CaptionDownloadUrls(url))
         {
             var bytes = GetCaptionBytes(candidate);
@@ -642,6 +649,11 @@ public static class YouTubeCatalog
 
         return null;
     }
+
+    internal static bool LooksLikeYouTubeCaptionUrl(string url) =>
+        url.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
+        url.Contains("googlevideo.com", StringComparison.OrdinalIgnoreCase) ||
+        url.Contains("timedtext", StringComparison.OrdinalIgnoreCase);
 
     internal static IEnumerable<string> CaptionDownloadUrls(string url)
     {
@@ -657,14 +669,16 @@ public static class YouTubeCatalog
         yield return EnsureVtt(url);
     }
 
-    private static byte[]? GetCaptionBytes(string url)
+    private static byte[]? GetCaptionBytes(string url, string? refererOverride = null)
     {
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
             request.Headers.TryAddWithoutValidation("User-Agent", ChromeUa);
-            request.Headers.TryAddWithoutValidation("Referer", "https://www.youtube.com/");
-            request.Headers.TryAddWithoutValidation("Origin", "https://www.youtube.com");
+            var referer = string.IsNullOrWhiteSpace(refererOverride) ? CaptionReferer(url) : refererOverride.Trim();
+            var origin = StreamCatalog.PageOrigin(referer) ?? referer.TrimEnd('/');
+            request.Headers.TryAddWithoutValidation("Referer", referer);
+            request.Headers.TryAddWithoutValidation("Origin", origin.TrimEnd('/'));
             request.Headers.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
             using var response = Http.Send(request, cts.Token);
@@ -673,8 +687,8 @@ public static class YouTubeCatalog
                 Thread.Sleep(500);
                 using var retry = new HttpRequestMessage(HttpMethod.Get, url);
                 retry.Headers.TryAddWithoutValidation("User-Agent", ChromeUa);
-                retry.Headers.TryAddWithoutValidation("Referer", "https://www.youtube.com/");
-                retry.Headers.TryAddWithoutValidation("Origin", "https://www.youtube.com");
+                retry.Headers.TryAddWithoutValidation("Referer", referer);
+                retry.Headers.TryAddWithoutValidation("Origin", referer.TrimEnd('/'));
                 retry.Headers.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
                 using var retryCts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
                 using var again = Http.Send(retry, retryCts.Token);
@@ -694,6 +708,17 @@ public static class YouTubeCatalog
         {
             return null;
         }
+    }
+
+    internal static string CaptionReferer(string url)
+    {
+        if (url.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
+            url.Contains("googlevideo.com", StringComparison.OrdinalIgnoreCase))
+        {
+            return "https://www.youtube.com/";
+        }
+
+        return StreamCatalog.PageOrigin(url) ?? "https://www.youtube.com/";
     }
 
     public static string Diagnose(string urlOrId)

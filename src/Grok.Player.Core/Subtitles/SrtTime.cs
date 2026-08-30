@@ -6,11 +6,11 @@ namespace Grok.Player.Core.Subtitles;
 public static class SrtTime
 {
     private static readonly Regex Line = new(
-        @"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)",
+        @"(-?\d+:\d+(?::\d+)?[,.]\d+)\s*-->\s*(-?\d+:\d+(?::\d+)?[,.]\d+)",
         RegexOptions.CultureInvariant);
 
     private static readonly Regex Instant = new(
-        @"^(-)?(\d+):(\d+):(\d+)[,.](\d+)$",
+        @"^(-)?(?:(\d+):)?(\d+):(\d+)[,.](\d+)$",
         RegexOptions.CultureInvariant);
 
     public static bool TryParse(string text, out TimeSpan time)
@@ -27,7 +27,9 @@ public static class SrtTime
             return false;
         }
 
-        var hours = int.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture);
+        var hours = match.Groups[2].Success
+            ? int.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture)
+            : 0;
         var minutes = int.Parse(match.Groups[3].Value, CultureInfo.InvariantCulture);
         var seconds = int.Parse(match.Groups[4].Value, CultureInfo.InvariantCulture);
         var fraction = match.Groups[5].Value;
@@ -51,9 +53,7 @@ public static class SrtTime
             return false;
         }
 
-        start = Read(match, 1);
-        end = Read(match, 5);
-        return true;
+        return TryParse(match.Groups[1].Value, out start) && TryParse(match.Groups[2].Value, out end);
     }
 
     public static string Format(TimeSpan time)
@@ -71,14 +71,4 @@ public static class SrtTime
     }
 
     public static long ToMs(TimeSpan time) => (long)Math.Round(time.TotalMilliseconds);
-
-    private static TimeSpan Read(Match match, int offset)
-    {
-        var hours = int.Parse(match.Groups[offset].Value, CultureInfo.InvariantCulture);
-        var minutes = int.Parse(match.Groups[offset + 1].Value, CultureInfo.InvariantCulture);
-        var seconds = int.Parse(match.Groups[offset + 2].Value, CultureInfo.InvariantCulture);
-        var fraction = match.Groups[offset + 3].Value;
-        var ms = int.Parse(fraction.PadRight(3, '0')[..3], CultureInfo.InvariantCulture);
-        return new TimeSpan(0, hours, minutes, seconds, ms);
-    }
 }

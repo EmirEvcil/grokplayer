@@ -301,6 +301,33 @@ assert.equal(embedApi.primarySurfaces().length, 0, "hdfilm waits for the iframe 
 embedApi.noteChildPlaying();
 assert.equal(embedApi.primarySurfaces()[0], embed, "hdfilm chip appears once the player is playing");
 
+const playmixVideo = el("video", { src: hlsTxt, w: 800, h: 450, paused: false, currentTime: 12, duration: 5400 });
+const closePlaying = el("iframe", {
+  className: "close",
+  "data-src": "https://hdfilmcehennemi.mobi/video/embed/xnZQ9xsXLfb/?rapidrame_id=gr2rb77x3mpm",
+  w: 800,
+  h: 450
+});
+const closeDoc = {
+  title: "Somebody",
+  querySelectorAll(sel) {
+    if (sel === "iframe") {
+      return [closePlaying];
+    }
+    if (sel === "video" || sel === "video, *") {
+      return [playmixVideo];
+    }
+    return [playmixVideo, closePlaying];
+  }
+};
+const closeApi = load(closeDoc, [{ name: hlsTxt }], "https://www.hdfilmcehennemi.nl/somebody-2024-hdf/");
+assert.equal(closeApi.current().url, hlsTxt);
+assert.equal(
+  closeApi.current().watchUrl,
+  "https://hdfilmcehennemi.mobi/video/embed/xnZQ9xsXLfb/?rapidrame_id=gr2rb77x3mpm",
+  "playmix Open keeps the Close/Rapidrame HTML player"
+);
+
 const pausedClip = el("video", { src: movie, w: 960, h: 540, paused: true, currentTime: 0 });
 const otherApi = load({
   title: "Other",
@@ -717,5 +744,109 @@ const lazyFrameDoc = {
 };
 const lazyFrameApi = load(lazyFrameDoc, [], "https://www.fullhdfilmizlesene.now/film/supergirl/");
 assert.equal(lazyFrameApi.current().url, rapidFrameUrl, "a visible lazy iframe is transferred before its src is activated");
+
+const vttEn = "https://i.knitwears.pics/cdn/down/abc/Subtitle/subtitle_eng.vtt";
+const vttTr = "https://i.knitwears.pics/cdn/down/abc/Subtitle/subtitle_tur.vtt";
+const chapterVtt = "https://static2.dmcdn.net/static/video/646967054_chapters.vtt";
+assert.ok(api.looksCaption(vttEn));
+assert.ok(api.looksCaption(vttTr));
+assert.ok(api.looksCaption("https://static2.dmcdn.net/static/video/646967054_subtitle_tr-auto.srt"));
+assert.ok(api.looksCaption("https://hdfilmcehennemi.mobi/vtt/2026/08/film-tur.vtt"));
+assert.ok(!api.looksCaption(chapterVtt), "chapter cues are not captions");
+assert.ok(!api.looksMedia(vttEn), "caption files are not treated as video");
+assert.equal(api.captionLangFromUrl(vttEn), "en");
+assert.equal(api.captionLangFromUrl(vttTr), "tr");
+assert.equal(api.captionLangFromUrl("https://cdn/subs/subtitle_ger.srt"), "de");
+
+const capVideo = el("video", { src: movie, w: 960, h: 540, paused: false, currentTime: 8, duration: 4140 });
+const capWrap = el("div", { className: "jwplayer" }, [capVideo]);
+capVideo.parentElement = capWrap;
+const capDoc = {
+  title: "Episode",
+  documentElement: { innerHTML: "[English]" + vttEn + ",[Turkish]" + vttTr },
+  querySelectorAll(sel) {
+    if (sel === "iframe") {
+      return [];
+    }
+    if (sel === "video, *") {
+      return [capWrap, capVideo];
+    }
+    if (String(sel).includes("track")) {
+      return [];
+    }
+    return [capVideo];
+  }
+};
+const capApi = load(capDoc, [{ name: movie }, { name: vttEn }], "https://dizipal2121.com/bolum/x");
+capApi.markPlayed(capVideo, 20);
+capApi.noteCaption(vttEn, false);
+capApi.noteCaption(vttTr, true);
+const caps = capApi.captionsForVideo(capVideo);
+assert.ok(caps.tracks.some((item) => item.url === vttEn), "Open transfers every available sidecar");
+assert.ok(caps.tracks.some((item) => item.url === vttTr), "Open transfers every available sidecar");
+assert.equal(caps.url, "", "the site's current subtitle is not the Open contract");
+assert.equal(capApi.current().captionUrl, "");
+assert.equal(capApi.current().sub, "");
+assert.ok(capApi.current().captionTracks.some((item) => item.url === vttEn));
+assert.ok(capApi.current().captionTracks.some((item) => item.url === vttTr));
+
+const liveDoc = {
+  title: "Live tracks",
+  documentElement: {
+    innerHTML: "",
+    getAttribute(name) {
+      if (name === "data-grokplayer-tracks") {
+        return JSON.stringify({
+          captionUrl: vttEn,
+          sub: "en",
+          audio: "tur",
+          audioName: "Turkish",
+          captions: [
+            { url: "", lang: "off", name: "Off", off: true, selected: false },
+            { url: vttEn, lang: "eng", name: "English", selected: true }
+          ],
+          audioTracks: [{ lang: "tur", name: "Turkish", selected: true }],
+          mediaUrl: "https://cdn.example/hls/master.m3u8"
+        });
+      }
+      return "";
+    }
+  },
+  querySelectorAll(sel) {
+    if (sel === "iframe") {
+      return [];
+    }
+    if (sel === "video, *") {
+      return [capWrap, capVideo];
+    }
+    return String(sel).includes("track") ? [] : [capVideo];
+  }
+};
+const liveApi = load(liveDoc, [{ name: movie }], "https://dizipal2121.com/bolum/x");
+const trackSniff = liveApi.current();
+assert.ok(trackSniff.captionTracks.some((item) => item.url === vttEn), "JW caption URLs stay in the transferred list");
+assert.equal(trackSniff.sub, "", "the site's current subtitle is not transferred as the active track");
+assert.equal(trackSniff.audio, "", "the site's current dub is not transferred as the active track");
+assert.equal(trackSniff.url, "https://cdn.example/hls/master.m3u8", "Open uses the player playlist file");
+
+const offDoc = {
+  title: "Off",
+  documentElement: {
+    innerHTML: "",
+    getAttribute() {
+      return JSON.stringify({ captionUrl: "", sub: "off", audio: "eng", captions: [{ url: "", off: true, selected: true }], audioTracks: [{ lang: "eng", selected: true }] });
+    }
+  },
+  querySelectorAll(sel) {
+    if (sel === "iframe") {
+      return [];
+    }
+    return sel.includes("video") ? [capVideo] : [];
+  }
+};
+const offApi = load(offDoc, [{ name: movie }], "https://example.com/watch");
+assert.equal(offApi.current().sub, "", "JW Off is not transferred as the active subtitle");
+assert.equal(offApi.current().captionUrl, "");
+assert.equal(offApi.current().audio, "");
 
 console.log("sniff.test.mjs ok");

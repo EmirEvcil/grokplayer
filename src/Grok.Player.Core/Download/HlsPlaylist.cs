@@ -36,6 +36,8 @@ public sealed class HlsVariant
          Codecs.Contains("av01", StringComparison.OrdinalIgnoreCase));
 }
 
+public sealed record HlsSubtitle(string Url, string Language, string Name, bool Forced);
+
 public sealed class HlsSegment
 {
     public HlsSegment(string url, double duration, long? rangeStart = null, int? rangeLength = null)
@@ -248,11 +250,15 @@ public static class HlsPlaylist
                hay.Contains("acont%3Ddubbed", StringComparison.OrdinalIgnoreCase);
     }
 
-    public static string? SubtitleUri(string text, string baseUrl, string? language)
+    public static IReadOnlyList<HlsSubtitle> Subtitles(string text, string baseUrl)
     {
-        string? fallback = null;
-        var lines = text.Replace("\r", "").Split('\n');
-        foreach (var raw in lines)
+        var list = new List<HlsSubtitle>();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return list;
+        }
+
+        foreach (var raw in text.Replace("\r", "").Split('\n'))
         {
             var line = raw.Trim();
             if (!line.StartsWith("#EXT-X-MEDIA:", StringComparison.OrdinalIgnoreCase) ||
@@ -267,13 +273,25 @@ public static class HlsPlaylist
                 continue;
             }
 
-            var resolved = Resolve(baseUrl, uri);
-            fallback ??= resolved;
-            var lang = AttributeValue(line, "LANGUAGE");
-            var name = AttributeValue(line, "NAME");
-            if (MediaLanguage.Matches(language, lang) || MediaLanguage.MatchesName(language, name))
+            list.Add(new HlsSubtitle(
+                Resolve(baseUrl, uri),
+                AttributeValue(line, "LANGUAGE"),
+                AttributeValue(line, "NAME"),
+                AttributeValue(line, "FORCED").Equals("YES", StringComparison.OrdinalIgnoreCase)));
+        }
+
+        return list;
+    }
+
+    public static string? SubtitleUri(string text, string baseUrl, string? language)
+    {
+        string? fallback = null;
+        foreach (var sub in Subtitles(text, baseUrl))
+        {
+            fallback ??= sub.Url;
+            if (MediaLanguage.Matches(language, sub.Language) || MediaLanguage.MatchesName(language, sub.Name))
             {
-                return resolved;
+                return sub.Url;
             }
         }
 

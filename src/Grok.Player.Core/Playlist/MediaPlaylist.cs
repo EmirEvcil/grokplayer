@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using Grok.Player.Core.Launch;
 using Grok.Player.Core.Media;
 
 namespace Grok.Player.Core.Playlist;
@@ -53,6 +54,8 @@ public sealed class PlaylistItem
     public string? Referer { get; set; }
 
     public string? CaptionUrl { get; set; }
+
+    public List<ExternalCaption> CaptionTracks { get; } = [];
 
     public int CachedHeight { get; set; }
 

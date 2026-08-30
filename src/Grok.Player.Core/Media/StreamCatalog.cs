@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Grok.Player.Core.Download;
+using Grok.Player.Core.Launch;
 using Grok.Player.Core.Subtitles;
 
 namespace Grok.Player.Core.Media;
@@ -1142,6 +1143,13 @@ public static class StreamCatalog
                 audioLang: audioLang,
                 subLang: subLang,
                 referer: "https://www.dailymotion.com/");
+            var captions = DailyCaptionTracks(root);
+            var caption = DailyCaptionUrl(root, subLang) ?? captions.FirstOrDefault()?.Url;
+            if (!string.IsNullOrWhiteSpace(caption))
+            {
+                playable = playable.WithCaption(caption);
+            }
+
             return AttachVodCaptions(playable, subLang);
         }
         catch (Exception)
@@ -1200,13 +1208,7 @@ public static class StreamCatalog
         string? media = null;
         foreach (var document in documents)
         {
-            media = PickMediaUrl(MediaUrlsIn(document));
-            if (!IsFetchableMedia(media, url))
-            {
-                media = null;
-            }
-
-            media ??= FirePlayerMedia(document, url, referer ?? url);
+            media = PickFetchableMedia(document, url, referer ?? url);
             if (!string.IsNullOrWhiteSpace(media))
             {
                 break;
@@ -1379,9 +1381,29 @@ public static class StreamCatalog
         }
     }
 
+    private static string? PickFetchableMedia(string html, string pageUrl, string referer)
+    {
+        foreach (var candidate in MediaUrlsIn(html)
+                     .OrderByDescending(MediaScore)
+                     .ThenBy(item => LooksDecoyManifest(item) ? 1 : 0))
+        {
+            if (LooksDecoyManifest(candidate) || MediaScore(candidate) < 0)
+            {
+                continue;
+            }
+
+            if (LooksPackedHls(candidate) || IsFetchableMedia(candidate, pageUrl))
+            {
+                return candidate;
+            }
+        }
+
+        return FirePlayerMedia(html, pageUrl, referer);
+    }
+
     private static bool IsFetchableMedia(string? media, string referer)
     {
-        if (string.IsNullOrWhiteSpace(media) || LooksImagePlaylistUrl(media) || LooksAd(media))
+        if (string.IsNullOrWhiteSpace(media) || LooksImagePlaylistUrl(media) || LooksAd(media) || LooksDecoyManifest(media))
         {
             return false;
         }
@@ -1403,9 +1425,20 @@ public static class StreamCatalog
         }
 
         var body = GetText(media, ChromeUa, referer);
-        return !string.IsNullOrWhiteSpace(body) &&
-               !body.Contains("<html", StringComparison.OrdinalIgnoreCase) &&
-               !IsImagePlaylist(body);
+        if (string.IsNullOrWhiteSpace(body) ||
+            body.Contains("<html", StringComparison.OrdinalIgnoreCase) ||
+            IsImagePlaylist(body))
+        {
+            return false;
+        }
+
+        var trimmed = body.AsSpan().TrimStart();
+        if (ext is ".mpd")
+        {
+            return body.Contains("<MPD", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return trimmed.StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase);
     }
 
     public static IReadOnlyList<string> MediaUrlsIn(string? text)
@@ -1427,9 +1460,14 @@ public static class StreamCatalog
                 .Replace("\\u002F", "/", StringComparison.Ordinal)
                 .Replace("\\u002f", "/", StringComparison.Ordinal);
             if (!clean.StartsWith("http", StringComparison.OrdinalIgnoreCase) ||
-                LooksImagePlaylistUrl(clean) ||
                 list.Contains(clean, StringComparer.Ordinal))
             {
+                return;
+            }
+
+            if (LooksImagePlaylistUrl(clean))
+            {
+                Add(SiblingPlaylistUrl(clean));
                 return;
             }
 
@@ -1488,6 +1526,121 @@ public static class StreamCatalog
         return compact;
     }
 
+    public static IReadOnlyList<ExternalCaption> SidecarCaptionsFromPage(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url) || !UrlSanitizer.IsUrl(url) || IsDirectMedia(url))
+        {
+            return [];
+        }
+
+        var html = GetText(url, ChromeUa, url);
+        if (string.IsNullOrWhiteSpace(html))
+        {
+            return [];
+        }
+
+        var local = SidecarCaptionsIn(html);
+        if (local.Count > 0)
+        {
+            return local;
+        }
+
+        foreach (var embed in PlayerEmbedsIn(html, url).Concat(AjaxPlayerEmbeds(html, url)).Distinct(StringComparer.Ordinal).Take(6))
+        {
+            try
+            {
+                var nested = GetText(embed, ChromeUa, url);
+                var found = SidecarCaptionsIn(nested);
+                if (found.Count > 0)
+                {
+                    return found;
+                }
+            }
+            catch (Exception)
+            {
+            }
+        }
+
+        return [];
+    }
+
+    public static IReadOnlyList<ExternalCaption> SidecarCaptionsIn(string? html)
+    {
+        var list = new List<ExternalCaption>();
+        if (string.IsNullOrWhiteSpace(html))
+        {
+            return list;
+        }
+
+        foreach (Match match in Regex.Matches(
+                     html,
+                     @"\[([^\]]+)\]\s*(https?://[^\s,""'\]<>]+)",
+                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            AddSidecar(list, match.Groups[1].Value, match.Groups[2].Value.TrimEnd('.', ';'));
+        }
+
+        foreach (Match match in Regex.Matches(
+                     html,
+                     @"""file""\s*:\s*""(https?:[^""]+\.(?:vtt|srt|ass|ssa|ttml)[^""]*)""[^\]\}]{0,240}?""label""\s*:\s*""([^""]+)""",
+                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            AddSidecar(list, match.Groups[2].Value, match.Groups[1].Value);
+        }
+
+        foreach (Match match in Regex.Matches(
+                     html,
+                     @"""label""\s*:\s*""([^""]+)""[^\]\}]{0,240}?""file""\s*:\s*""(https?:[^""]+\.(?:vtt|srt|ass|ssa|ttml)[^""]*)""",
+                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            AddSidecar(list, match.Groups[1].Value, match.Groups[2].Value);
+        }
+
+        foreach (Match match in Regex.Matches(
+                     html,
+                     @"""?file""?\s*:\s*""(https?:[^""]+\.(?:vtt|srt|ass|ssa|ttml)[^""]*)""",
+                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            AddSidecar(list, "", match.Groups[1].Value);
+        }
+
+        return list;
+    }
+
+    private static void AddSidecar(List<ExternalCaption> list, string name, string url)
+    {
+        url = url.Replace("\\/", "/", StringComparison.Ordinal);
+        if (string.IsNullOrWhiteSpace(url) ||
+            !url.StartsWith("http", StringComparison.OrdinalIgnoreCase) ||
+            Regex.IsMatch(url, @"chapter|storyboard|thumb|seeker|filmstrip|sprite|preview|timeline", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            return;
+        }
+
+        if (!Regex.IsMatch(url, @"\.(vtt|srt|ass|ssa|ttml|dfxp)(?:$|\?)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) &&
+            !Regex.IsMatch(url, @"subtitle|caption|timedtext|/(?:subs?|subtitles?)/", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) &&
+            string.IsNullOrWhiteSpace(name))
+        {
+            return;
+        }
+
+        var language = MediaLanguage.Normalize(name);
+        if (language.Length == 0 || MediaLanguage.IsOriginal(language))
+        {
+            language = MediaLanguage.FromName(name);
+        }
+
+        if (list.Any(item => string.Equals(item.Url, url, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        list.Add(new ExternalCaption(
+            language,
+            url,
+            string.IsNullOrWhiteSpace(name) ? (language.Length == 0 ? "Subtitle" : language) : name.Trim()));
+    }
+
     internal static IReadOnlyList<string> PlayerEmbedsIn(string? html, string pageUrl)
     {
         var list = new List<string>();
@@ -1523,7 +1676,7 @@ public static class StreamCatalog
             }
 
             var mark = uri.AbsoluteUri + " " + tag.Value;
-            if (!Regex.IsMatch(mark, @"embed|player|video|vod|rapidvid|rapidrame|/e/|watch", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+            if (!Regex.IsMatch(mark, @"embed|player|video|vod|rapidvid|rapidrame|/e/|watch|\bclose\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
             {
                 continue;
             }
@@ -1828,16 +1981,17 @@ public static class StreamCatalog
 
         foreach (Match call in Regex.Matches(
                      html,
-                     @"dc_[A-Za-z0-9]+\(\s*\[((?:""[^""]*""\s*,?\s*)+)\]\s*\)",
+                     @"dc_([A-Za-z0-9]+)\(\s*\[((?:""[^""]*""\s*,?\s*)+)\]\s*\)",
                      RegexOptions.CultureInvariant))
         {
             var parts = new List<string>();
-            foreach (Match part in Regex.Matches(call.Groups[1].Value, @"""([^""]*)"""))
+            foreach (Match part in Regex.Matches(call.Groups[2].Value, @"""([^""]*)"""))
             {
-                parts.Add(part.Groups[1].Value);
+                parts.Add(UnescapePackedPart(part.Groups[1].Value));
             }
 
-            var decoded = DecodePackedPlayerUrl(parts);
+            var body = PackedDecoderBody(html, "dc_" + call.Groups[1].Value);
+            var decoded = DecodePackedWithBody(parts, body) ?? DecodePackedPlayerUrl(parts);
             if (!string.IsNullOrWhiteSpace(decoded) &&
                 decoded.StartsWith("http", StringComparison.OrdinalIgnoreCase) &&
                 !list.Contains(decoded, StringComparer.Ordinal))
@@ -1987,9 +2141,159 @@ public static class StreamCatalog
             return null;
         }
 
+        var joined = string.Concat(parts.Select(UnescapePackedPart));
+        foreach (var candidate in new[] { DecodePackedCurrent(joined), DecodePackedLegacy(joined) })
+        {
+            if (!string.IsNullOrWhiteSpace(candidate) &&
+                candidate.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private static string UnescapePackedPart(string part) =>
+        part.Replace("\\/", "/", StringComparison.Ordinal)
+            .Replace("\\u002F", "/", StringComparison.OrdinalIgnoreCase)
+            .Replace("\\u002f", "/", StringComparison.Ordinal);
+
+    private static string? PackedDecoderBody(string html, string name)
+    {
+        var header = Regex.Match(
+            html,
+            @"(?:function\s+)?" + Regex.Escape(name) + @"\s*\(\s*value_parts\s*\)\s*\{",
+            RegexOptions.CultureInvariant);
+        if (!header.Success)
+        {
+            return null;
+        }
+
+        var close = html.IndexOf("return unmix;", header.Index, StringComparison.Ordinal);
+        if (close < 0)
+        {
+            return null;
+        }
+
+        return html[header.Index..close];
+    }
+
+    internal static string? DecodePackedWithBody(IReadOnlyList<string> parts, string? body)
+    {
+        if (parts is null || parts.Count == 0 || string.IsNullOrWhiteSpace(body))
+        {
+            return null;
+        }
+
         try
         {
-            var joined = string.Concat(parts);
+            var result = string.Concat(parts.Select(UnescapePackedPart));
+            var steps = new List<(int Index, int End, string Kind, int Arg)>();
+            foreach (Match item in Regex.Matches(body, @"atob\s*\(\s*(?:result|value)[^;]*\)", RegexOptions.CultureInvariant))
+            {
+                steps.Add((item.Index, item.Index + item.Length, "atob", 0));
+            }
+
+            foreach (Match item in Regex.Matches(body, @"split\(\s*['""]['""]\s*\)\.reverse", RegexOptions.CultureInvariant))
+            {
+                steps.Add((item.Index, item.Index + item.Length, "reverse", 0));
+            }
+
+            foreach (Match item in Regex.Matches(body, @"base\s*\+\s*(\d+)", RegexOptions.CultureInvariant))
+            {
+                if (int.TryParse(item.Groups[1].Value, out var shift))
+                {
+                    steps.Add((item.Index, item.Index + item.Length, "rot", shift));
+                }
+            }
+
+            steps.Sort((left, right) =>
+            {
+                if (left.Index < right.Index && right.Index < left.End)
+                {
+                    return 1;
+                }
+
+                if (right.Index < left.Index && left.Index < right.End)
+                {
+                    return -1;
+                }
+
+                return left.Index.CompareTo(right.Index);
+            });
+            foreach (var step in steps)
+            {
+                result = step.Kind switch
+                {
+                    "reverse" => ReverseAscii(result),
+                    "atob" => Latin1(FromBase64(result)),
+                    "rot" => RotLetters(result, step.Arg),
+                    _ => result
+                };
+            }
+
+            var accMatch = Regex.Match(body, @"var\s+acc\s*=\s*(\d+)", RegexOptions.CultureInvariant);
+            var addMatch = Regex.Match(body, @"acc\s*=\s*\(acc\s*\+\s*(\d+)\)", RegexOptions.CultureInvariant);
+            if (!accMatch.Success || !addMatch.Success ||
+                !int.TryParse(accMatch.Groups[1].Value, out var acc) ||
+                !int.TryParse(addMatch.Groups[1].Value, out var add))
+            {
+                return null;
+            }
+
+            var bytes = System.Text.Encoding.Latin1.GetBytes(result);
+            var plain = new byte[bytes.Length];
+            for (var i = 0; i < bytes.Length; i++)
+            {
+                var value = bytes[i];
+                acc = (acc + add) % 256;
+                plain[i] = (byte)(value ^ acc);
+                acc = (acc + value) % 256;
+            }
+
+            var decoded = System.Text.Encoding.UTF8.GetString(plain);
+            return decoded.StartsWith("http", StringComparison.OrdinalIgnoreCase) ? decoded : null;
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+    }
+
+    private static string? DecodePackedCurrent(string joined)
+    {
+        try
+        {
+            var result = Latin1(FromBase64(joined));
+            result = RotLetters(result, 16);
+            result = Latin1(FromBase64(result));
+            result = Latin1(FromBase64(result));
+            result = Latin1(FromBase64(result));
+            result = Latin1(FromBase64(result));
+            var bytes = System.Text.Encoding.Latin1.GetBytes(result);
+            var acc = 105;
+            var plain = new byte[bytes.Length];
+            for (var i = 0; i < bytes.Length; i++)
+            {
+                var value = bytes[i];
+                acc = (acc + 11) % 256;
+                plain[i] = (byte)(value ^ acc);
+                acc = (acc + value) % 256;
+            }
+
+            return System.Text.Encoding.UTF8.GetString(plain);
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+    }
+
+    private static string? DecodePackedLegacy(string joined)
+    {
+        try
+        {
             var rotated = RotLetters(ReverseAscii(joined), 15);
             var once = Latin1(FromBase64(rotated));
             var twice = Latin1(FromBase64(once));
@@ -2080,6 +2384,17 @@ public static class StreamCatalog
         return Regex.Replace(url, @"/txt/master\.txt", "/master.txt", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 
+    internal static bool LooksDecoyManifest(string? url) =>
+        !string.IsNullOrWhiteSpace(url) &&
+        url.Contains("playmix.uno", StringComparison.OrdinalIgnoreCase);
+
+    internal static bool LooksPackedHls(string? url) =>
+        !string.IsNullOrWhiteSpace(url) &&
+        !LooksDecoyManifest(url) &&
+        !LooksImagePlaylistUrl(url) &&
+        url.Contains("/hls/", StringComparison.OrdinalIgnoreCase) &&
+        url.Contains("master.txt", StringComparison.OrdinalIgnoreCase);
+
     public static bool LooksImagePlaylistUrl(string? url) =>
         !string.IsNullOrWhiteSpace(url) &&
         (Regex.IsMatch(url, @"/image\d+\.(jpg|jpeg|png|webp)|/txt/master\.txt", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant) ||
@@ -2124,6 +2439,11 @@ public static class StreamCatalog
                  text.Contains(".mov", StringComparison.Ordinal))
         {
             score += 1500;
+        }
+
+        if (LooksDecoyManifest(text))
+        {
+            score -= 5000;
         }
 
         if (LooksAd(text) ||
@@ -2173,7 +2493,7 @@ public static class StreamCatalog
         !string.IsNullOrWhiteSpace(url) &&
         Regex.IsMatch(
             url,
-            @"doubleclick|googlesyndication|imasdk|adsystem|/ads?/|preroll|vast|spotx|pubads|adnxs|advert|promo|/rekla/|reklam|xpartner|dmxleo|marmorated\.pics|shrgo\.net|clips\.kick|/clips?/|bumper",
+            @"doubleclick|googlesyndication|imasdk|adsystem|/ads?/|preroll|vast|spotx|pubads|adnxs|advert|promo|/rekla/|reklam|xpartner|dmxleo|marmorated\.pics|shrgo\.net|clips\.kick|/clips?/|bumper|site\.webm",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
     public static YouTubePlayable AttachVodCaptions(YouTubePlayable playable, string? language)
@@ -2326,6 +2646,11 @@ public static class StreamCatalog
             if (!string.IsNullOrWhiteSpace(referer))
             {
                 request.Headers.TryAddWithoutValidation("Referer", referer);
+                var origin = PageOrigin(referer)?.TrimEnd('/');
+                if (!string.IsNullOrWhiteSpace(origin))
+                {
+                    request.Headers.TryAddWithoutValidation("Origin", origin);
+                }
             }
 
             request.Headers.TryAddWithoutValidation("Accept", "*/*");
@@ -2558,6 +2883,118 @@ public static class StreamCatalog
 
         var fromPage = PickMediaUrl(MediaUrlsIn(html));
         return string.IsNullOrWhiteSpace(fromPage) ? null : fromPage;
+    }
+
+    internal static IReadOnlyList<ExternalCaption> DailyCaptionTracks(JsonElement root)
+    {
+        var list = new List<ExternalCaption>();
+        if (!root.TryGetProperty("subtitles", out var subs) ||
+            subs.ValueKind != JsonValueKind.Object ||
+            !subs.TryGetProperty("data", out var data) ||
+            data.ValueKind != JsonValueKind.Object)
+        {
+            return list;
+        }
+
+        foreach (var item in data.EnumerateObject())
+        {
+            var url = DailySubtitleFile(item.Value);
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                continue;
+            }
+
+            var label = item.Value.TryGetProperty("label", out var labelEl) ? labelEl.GetString() : null;
+            var language = MediaLanguage.Normalize(item.Name, keepKind: true);
+            if (language.Length == 0 || MediaLanguage.IsOriginal(language))
+            {
+                language = MediaLanguage.FromName(label);
+            }
+
+            list.Add(new ExternalCaption(
+                language,
+                url,
+                string.IsNullOrWhiteSpace(label) ? (language.Length == 0 ? "Subtitle" : language) : label));
+        }
+
+        return list;
+    }
+
+    public static IReadOnlyList<ExternalCaption> DailyCaptions(string? videoId)
+    {
+        if (string.IsNullOrWhiteSpace(videoId))
+        {
+            return [];
+        }
+
+        var json = GetJson(
+            "https://www.dailymotion.com/player/metadata/video/" + Uri.EscapeDataString(videoId),
+            "https://www.dailymotion.com/");
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return [];
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            return DailyCaptionTracks(document.RootElement);
+        }
+        catch (Exception)
+        {
+            return [];
+        }
+    }
+
+    internal static string? DailyCaptionUrl(JsonElement root, string? language)
+    {
+        var tracks = DailyCaptionTracks(root);
+        if (tracks.Count == 0)
+        {
+            return null;
+        }
+
+        var want = MediaLanguage.Normalize(language);
+        foreach (var track in tracks)
+        {
+            if (want.Length == 0 ||
+                MediaLanguage.Matches(language, track.Language) ||
+                MediaLanguage.MatchesName(language, track.Name))
+            {
+                return track.Url;
+            }
+        }
+
+        return string.IsNullOrWhiteSpace(language) ? tracks[0].Url : null;
+    }
+
+    private static string? DailySubtitleFile(JsonElement node)
+    {
+        if (node.ValueKind != JsonValueKind.Object ||
+            !node.TryGetProperty("urls", out var urls) ||
+            urls.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (var item in urls.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            var href = item.GetString();
+            if (string.IsNullOrWhiteSpace(href) ||
+                Regex.IsMatch(href, @"chapter|storyboard|thumb|seeker|filmstrip|sprite|preview|timeline", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+            {
+                continue;
+            }
+
+            return href;
+        }
+
+        return null;
     }
 
     private static string? DailyQualityUrl(JsonElement root)

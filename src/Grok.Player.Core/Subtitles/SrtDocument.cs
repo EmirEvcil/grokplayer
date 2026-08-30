@@ -313,6 +313,8 @@ public sealed class SrtDocument
         return Parse(text, compact: !path.EndsWith(".vtt", StringComparison.OrdinalIgnoreCase));
     }
 
+    internal static string LoadText(byte[] bytes) => Decode(bytes);
+
     public void Save(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);

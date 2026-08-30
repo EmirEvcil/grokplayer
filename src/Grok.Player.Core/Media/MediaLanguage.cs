@@ -182,8 +182,39 @@ public static class MediaLanguage
             return false;
         }
 
-        return want.Length >= 2 && have.Length >= 2 &&
-               want[..2].Equals(have[..2], StringComparison.OrdinalIgnoreCase);
+        if (want.Length >= 2 && have.Length >= 2 &&
+            want[..2].Equals(have[..2], StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return SameIsoLanguage(want, have);
+    }
+
+    private static bool SameIsoLanguage(string left, string right)
+    {
+        static string Fold(string value)
+        {
+            value = value.Trim().ToLowerInvariant();
+            return value switch
+            {
+                "ger" or "deu" => "de",
+                "tur" or "trk" => "tr",
+                "eng" => "en",
+                "fra" or "fre" => "fr",
+                "spa" => "es",
+                "ita" => "it",
+                "por" => "pt",
+                "jpn" => "ja",
+                "kor" => "ko",
+                "chi" or "zho" => "zh",
+                "ara" => "ar",
+                "rus" => "ru",
+                _ => value.Length > 2 ? value[..2] : value
+            };
+        }
+
+        return Fold(left) == Fold(right);
     }
 
     public static bool MatchesName(string? requested, string? name)

@@ -48,10 +48,79 @@ public static class HlsCaptions
 
         var folder = Path.Combine(Path.GetTempPath(), "GrokPlayer", "captions");
         Directory.CreateDirectory(folder);
-        var stem = string.IsNullOrWhiteSpace(cacheId) ? "hls" : cacheId.Replace('|', '.');
         var lang = MediaLanguage.Normalize(language);
-        var vtt = Path.Combine(folder, stem + "." + (lang.Length == 0 ? "auto" : lang) + ".vtt");
+        var vtt = Path.Combine(folder, CacheStem(cacheId) + "." + (lang.Length == 0 ? "auto" : lang) + ".vtt");
         return StreamCaptionLoader.WriteSrt(vtt, body);
+    }
+
+    public static IReadOnlyList<(string File, string Name, string Language)> LoadAll(
+        string mediaUrl,
+        string? userAgent,
+        string? cacheId)
+    {
+        var list = new List<(string File, string Name, string Language)>();
+        if (string.IsNullOrWhiteSpace(mediaUrl))
+        {
+            return list;
+        }
+
+        var ext = StreamProbe.Extension(mediaUrl);
+        if (ext is ".mp4" or ".mkv" or ".webm" or ".mov" or ".m4v")
+        {
+            return list;
+        }
+
+        var master = StreamCatalog.GetText(mediaUrl, userAgent, mediaUrl);
+        if (string.IsNullOrWhiteSpace(master) || !HlsPlaylist.IsMaster(master))
+        {
+            return list;
+        }
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var folder = Path.Combine(Path.GetTempPath(), "GrokPlayer", "captions");
+        Directory.CreateDirectory(folder);
+        var stem = CacheStem(cacheId ?? mediaUrl);
+        foreach (var sub in HlsPlaylist.Subtitles(master, mediaUrl))
+        {
+            if (sub.Forced)
+            {
+                continue;
+            }
+
+            var lang = MediaLanguage.Normalize(string.IsNullOrWhiteSpace(sub.Language) ? sub.Name : sub.Language);
+            if (lang.Length > 0 && !seen.Add(lang))
+            {
+                continue;
+            }
+
+            var body = ReadDocument(sub.Url, userAgent);
+            if (string.IsNullOrWhiteSpace(body) || !StreamCaptionLoader.LooksLikeSidecar(body))
+            {
+                continue;
+            }
+
+            var parsed = SrtDocument.Parse(body, compact: false).ForDisplay();
+            if (parsed.Cues.Count == 0)
+            {
+                continue;
+            }
+
+            var name = string.IsNullOrWhiteSpace(sub.Name) ? lang : sub.Name.Trim();
+            var tag = lang.Length == 0 ? "auto" : lang;
+            var vtt = Path.Combine(folder, stem + "." + tag + ".vtt");
+            File.WriteAllText(vtt, ToWebVtt(parsed));
+            foreach (var extra in new[] { Path.ChangeExtension(vtt, ".srt"), Path.ChangeExtension(vtt, ".ass") })
+            {
+                if (File.Exists(extra))
+                {
+                    File.Delete(extra);
+                }
+            }
+
+            list.Add((vtt, name, lang));
+        }
+
+        return list;
     }
 
     public static string? SubtitleUriFromManifest(string manifest, string mediaUrl, string? language)
@@ -96,6 +165,39 @@ public static class HlsCaptions
         }
 
         return !HlsPlaylist.IsMaster(manifest) && HlsPlaylist.IsLive(manifest);
+    }
+
+    private static string ToWebVtt(SrtDocument document)
+    {
+        var builder = new System.Text.StringBuilder();
+        builder.Append("WEBVTT\n\n");
+        foreach (var cue in document.Cues)
+        {
+            builder.Append(SrtTime.Format(cue.Start));
+            builder.Append(" --> ");
+            builder.Append(SrtTime.Format(cue.End));
+            builder.Append('\n');
+            builder.Append(cue.Text);
+            builder.Append("\n\n");
+        }
+
+        return builder.ToString();
+    }
+
+    private static string CacheStem(string? cacheId)
+    {
+        if (string.IsNullOrWhiteSpace(cacheId))
+        {
+            return "hls";
+        }
+
+        if (cacheId.IndexOfAny(Path.GetInvalidFileNameChars()) < 0 && cacheId.Length <= 80)
+        {
+            return cacheId.Replace("|", ".", StringComparison.Ordinal);
+        }
+
+        return "hls-" + Math.Abs(cacheId.GetHashCode(StringComparison.Ordinal))
+            .ToString("x", System.Globalization.CultureInfo.InvariantCulture);
     }
 
     public static string? SidecarUrl(string mediaUrl, string extension)

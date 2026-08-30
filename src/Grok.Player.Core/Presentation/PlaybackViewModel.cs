@@ -58,6 +58,9 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
     private string? _captionFile;
     private int _captionAppliedSerial;
     private bool _skipStreamCaptions;
+    private readonly List<(string File, string Name, string Language)> _sidecars = [];
+    private int _subCycle = -1;
+    private bool _subPicked;
     private int _videoHeight;
     private double? _hintDuration;
 
@@ -662,6 +665,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         string? referer = null;
         string? soundtrack = null;
         double? externalDuration = null;
+        IReadOnlyList<ExternalCaption> captions = [];
         var protocolKind = StreamKind.Unknown;
         if (ExternalOpen.TryParse(trimmed, out var external))
         {
@@ -688,6 +692,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             captionUrl ??= external.CaptionUrl;
             referer ??= external.Referer;
             soundtrack = external.Soundtrack;
+            captions = external.Captions;
             externalDuration = external.DurationSeconds;
             if (external.DurationSeconds is > 0)
             {
@@ -816,7 +821,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             }
 
             if (protocol || !string.IsNullOrWhiteSpace(audioLang) || !string.IsNullOrWhiteSpace(subLang) ||
-                !string.IsNullOrWhiteSpace(captionUrl))
+                !string.IsNullOrWhiteSpace(captionUrl) || captions.Count > 0)
             {
                 var previousSub = item.SubLang;
                 item.AudioLang = _audioLang;
@@ -829,6 +834,12 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
                 else if (protocol && !SameCachedLang(previousSub, _subLang))
                 {
                     item.CaptionUrl = null;
+                }
+
+                if (captions.Count > 0)
+                {
+                    item.CaptionTracks.Clear();
+                    item.CaptionTracks.AddRange(captions);
                 }
             }
         }
@@ -856,7 +867,12 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         }
 
         var kickVod = StreamCatalog.TryReadKick(referer, out var kickKind, out _) && kickKind == "video";
-        return kickVod || StreamCatalog.LooksAd(media) || StreamCatalog.RequiresPlayerPage(media) || durationSeconds is > 0 and <= 3
+        var dailyPage = StreamCatalog.TryReadDailymotion(referer, out _) &&
+                        StreamCatalog.IsDirectMedia(media) &&
+                        media.Contains("dailymotion", StringComparison.OrdinalIgnoreCase);
+        var packedPlayer = media.Contains("playmix.uno", StringComparison.OrdinalIgnoreCase) &&
+                           StreamCatalog.LooksLikeHtmlPage(referer);
+        return kickVod || dailyPage || packedPlayer || StreamCatalog.LooksAd(media) || StreamCatalog.RequiresPlayerPage(media) || durationSeconds is > 0 and <= 3
             ? referer
             : media;
     }
@@ -1136,6 +1152,359 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         });
     }
 
+    public string AudioTrackLabel
+    {
+        get
+        {
+            if (!HasMedia)
+            {
+                return "Audio";
+            }
+
+            var track = _player.ListTracks("audio").FirstOrDefault(item => item.Selected);
+            var name = TrackDisplay(track);
+            return string.IsNullOrWhiteSpace(name) ? "Audio" : "Audio " + name;
+        }
+    }
+
+    public string SubtitleTrackLabel
+    {
+        get
+        {
+            if (!HasMedia)
+            {
+                return "Subs";
+            }
+
+            var choices = BuildSubChoices();
+            if (choices.Count == 0)
+            {
+                return "Subs Off";
+            }
+
+            if (_subCycle < 0 || _subCycle >= choices.Count)
+            {
+                return "Subs Off";
+            }
+
+            return "Subs " + choices[_subCycle].Name;
+        }
+    }
+
+    public void CycleAudio()
+    {
+        if (!HasMedia)
+        {
+            Note("No audio tracks");
+            return;
+        }
+
+        var tracks = _player.ListTracks("audio");
+        if (tracks.Count == 0)
+        {
+            Note("No audio tracks");
+            RefreshTrackLabels();
+            return;
+        }
+
+        var index = -1;
+        for (var i = 0; i < tracks.Count; i++)
+        {
+            if (tracks[i].Selected)
+            {
+                index = i;
+                break;
+            }
+        }
+
+        var next = tracks[(index + 1) % tracks.Count];
+        _player.SetTrack("audio", next.Id);
+        RefreshTrackLabels();
+        Note(AudioTrackLabel);
+    }
+
+    public void CycleSubtitle()
+    {
+        if (!HasMedia)
+        {
+            Note("No subtitles");
+            return;
+        }
+
+        var choices = BuildSubChoices();
+        if (choices.Count == 0)
+        {
+            _subCycle = -1;
+            _subPicked = true;
+            ApplySubChoice(null);
+            RefreshTrackLabels();
+            OnPropertyChanged(nameof(OnScreenCaption));
+            Note("Subs Off");
+            return;
+        }
+
+        _subPicked = true;
+        _subCycle++;
+        if (_subCycle >= choices.Count)
+        {
+            _subCycle = -1;
+        }
+
+        ApplySubChoice(_subCycle < 0 ? null : choices[_subCycle]);
+        RefreshTrackLabels();
+        OnPropertyChanged(nameof(OnScreenCaption));
+        Note(SubtitleTrackLabel);
+    }
+
+    private sealed record SubChoice(string Name, string Language, string? File, long? TrackId);
+
+    private IReadOnlyList<SubChoice> BuildSubChoices()
+    {
+        var choices = new List<SubChoice>();
+
+        void Add(string name, string language, string? file, long? id)
+        {
+            var lang = MediaLanguage.Normalize(string.IsNullOrWhiteSpace(language) ? name : language, keepKind: true);
+            var label = SubDisplayName(name, lang);
+            if (IsGenericSubStub(label))
+            {
+                return;
+            }
+
+            if (lang.Length > 0)
+            {
+                for (var i = 0; i < choices.Count; i++)
+                {
+                    if (!SameSubChoice(choices[i].Language, lang))
+                    {
+                        continue;
+                    }
+
+                    var cur = choices[i];
+                    choices[i] = cur with
+                    {
+                        File = string.IsNullOrWhiteSpace(cur.File) ? file : cur.File,
+                        TrackId = cur.TrackId ?? id
+                    };
+                    return;
+                }
+            }
+
+            choices.Add(new SubChoice(label, lang, file, id));
+        }
+
+        var sidecars = _sidecars.ToArray();
+        foreach (var side in sidecars.Where(item => !IsWeakSubName(item.Name)))
+        {
+            Add(side.Name, side.Language, side.File, null);
+        }
+
+        foreach (var side in sidecars.Where(item => IsWeakSubName(item.Name)))
+        {
+            Add(side.Name, side.Language, side.File, null);
+        }
+
+        foreach (var track in _player.ListTracks("sub").Where(item => !item.External))
+        {
+            var display = TrackDisplay(track) ?? track.Language;
+            if (IsGenericSubStub(display) || IsForcedSub(display))
+            {
+                continue;
+            }
+
+            Add(display, track.Language, null, track.Id);
+        }
+
+        return choices;
+    }
+
+    private static string SubDisplayName(string? name, string language)
+    {
+        var kind = MediaLanguage.Kind(language);
+        string core;
+        if (MediaLanguage.Matches(language, "tr") || MediaLanguage.MatchesName("tr", name))
+        {
+            core = "Türkçe";
+        }
+        else if (MediaLanguage.Matches(language, "en") || MediaLanguage.MatchesName("en", name))
+        {
+            core = "English";
+        }
+        else
+        {
+            var label = (name ?? "").Trim();
+            core = IsWeakSubName(label) ? (language.Length == 0 ? "" : MediaLanguage.Normalize(language)) : label;
+        }
+
+        if (string.Equals(kind, "asr", StringComparison.OrdinalIgnoreCase))
+        {
+            return string.IsNullOrWhiteSpace(core) ? "auto" : core + " (auto)";
+        }
+
+        return core;
+    }
+
+    private static bool SameSubChoice(string? left, string? right)
+    {
+        if (!MediaLanguage.Matches(left, right))
+        {
+            return false;
+        }
+
+        return string.Equals(
+            MediaLanguage.Kind(left) ?? "",
+            MediaLanguage.Kind(right) ?? "",
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsGenericSubStub(string? name)
+    {
+        var text = (name ?? "").Trim();
+        return text.Length == 0 ||
+               text.Equals("und", StringComparison.OrdinalIgnoreCase) ||
+               text.Equals("sub", StringComparison.OrdinalIgnoreCase) ||
+               text.Equals("subtitle", StringComparison.OrdinalIgnoreCase) ||
+               text.Equals("subtitles", StringComparison.OrdinalIgnoreCase) ||
+               text.Equals("original", StringComparison.OrdinalIgnoreCase) ||
+               text.Equals("orig", StringComparison.OrdinalIgnoreCase) ||
+               text.Equals("default", StringComparison.OrdinalIgnoreCase) ||
+               text.Equals("unknown", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsForcedSub(string? name)
+    {
+        var text = (name ?? "").Trim();
+        return text.Contains("zorunlu", StringComparison.OrdinalIgnoreCase) ||
+               text.Contains("forced", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsWeakSubName(string? name)
+    {
+        var text = (name ?? "").Trim();
+        if (IsGenericSubStub(text))
+        {
+            return true;
+        }
+
+        return text.Length is 2 or 3 && text.All(char.IsAsciiLetter);
+    }
+
+    private void ApplyCycledSubtitle()
+    {
+        var choices = BuildSubChoices();
+        ApplySubChoice(_subCycle < 0 || _subCycle >= choices.Count ? null : choices[_subCycle]);
+    }
+
+    private bool _applyingSub;
+    private bool _cueOverlay;
+
+    private void ApplySubChoice(SubChoice? choice)
+    {
+        if (choice is null)
+        {
+            HideStreamSubtitles();
+            if (Subtitles.Applied is not null)
+            {
+                Subtitles.Disable(rememberOff: false);
+            }
+
+            OnPropertyChanged(nameof(OnScreenCaption));
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(choice.File))
+        {
+            if (!_applyingSub)
+            {
+                _applyingSub = true;
+                try
+                {
+                    Subtitles.AddFile(choice.File, apply: true, attachTo: CurrentSubtitleMedia());
+                }
+                finally
+                {
+                    _applyingSub = false;
+                }
+            }
+
+            foreach (var play in SubPlayPaths(choice.File))
+            {
+                if (_player.SetSubtitleFile(play))
+                {
+                    _cueOverlay = false;
+                    _player.ClearSubtitleFilter();
+                    _player.SetAssOverlay(null);
+                    OnPropertyChanged(nameof(OnScreenCaption));
+                    return;
+                }
+            }
+
+            foreach (var play in SubPlayPaths(choice.File))
+            {
+                if (_player.SetSubtitleFilter(play))
+                {
+                    _cueOverlay = false;
+                    _player.SetAssOverlay(null);
+                    OnPropertyChanged(nameof(OnScreenCaption));
+                    return;
+                }
+            }
+
+            _cueOverlay = true;
+            PushCueOverlay();
+            OnPropertyChanged(nameof(OnScreenCaption));
+            return;
+        }
+
+        _cueOverlay = false;
+        _player.ClearSubtitleFilter();
+        _player.SetAssOverlay(null);
+        if (choice.TrackId is { } id)
+        {
+            _player.SetTrack("sub", id);
+        }
+    }
+
+    private static IEnumerable<string> SubPlayPaths(string file)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var play in new[]
+                 {
+                     file,
+                     StreamCaptionLoader.PlaySidecar(file),
+                     StreamCaptionLoader.PlayPath(file)
+                 })
+        {
+            if (string.IsNullOrWhiteSpace(play) || !File.Exists(play) || !seen.Add(play))
+            {
+                continue;
+            }
+
+            yield return play;
+        }
+    }
+
+    private static string? TrackDisplay(PlayerTrack? track)
+    {
+        if (track is null)
+        {
+            return null;
+        }
+
+        if (!string.IsNullOrWhiteSpace(track.Title))
+        {
+            return track.Title;
+        }
+
+        return string.IsNullOrWhiteSpace(track.Language) ? null : track.Language;
+    }
+
+    private void RefreshTrackLabels()
+    {
+        OnPropertyChanged(nameof(AudioTrackLabel));
+        OnPropertyChanged(nameof(SubtitleTrackLabel));
+    }
+
     public void SetLoop(LoopMode mode)
     {
         Loop = mode;
@@ -1340,9 +1709,21 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
 
+        if (!StreamSubtitles.Enabled)
+        {
+            HideStreamSubtitles();
+            return;
+        }
+
+        if (_subPicked)
+        {
+            ApplyCycledSubtitle();
+            return;
+        }
+
         if (_skipStreamCaptions && _playingStreams)
         {
-            _player.SetSubtitleFile(null);
+            HideStreamSubtitles();
             return;
         }
 
@@ -1371,6 +1752,11 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             }
 
             _player.SetSubDelay(Subtitles.DelaySeconds);
+            return;
+        }
+
+        if (_sidecars.Count > 0)
+        {
             return;
         }
 
@@ -1406,14 +1792,28 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         if (mode == StreamSubtitleMode.Off)
         {
             _captionFile = null;
-            _player.SetSubtitleFile(null);
+            _subCycle = -1;
+            _subPicked = true;
+            ClearStreamCaptions(userOff: true);
+            HideStreamSubtitles();
         }
-        else if (_youtube is not null)
+        else
         {
-            StartCaptionLoad(_youtube);
+            _subPicked = false;
+            Subtitles.ClearRememberedOff();
+            if (_youtube is not null)
+            {
+                StartCaptionLoad(_youtube);
+            }
+            else if (CurrentItem() is { } item)
+            {
+                QueueAttachCaptions(item);
+            }
         }
 
         OnPropertyChanged(nameof(StreamSubtitles));
+        OnPropertyChanged(nameof(OnScreenCaption));
+        RefreshTrackLabels();
         Note(mode == StreamSubtitleMode.Off ? "Stream subtitles off" : "Stream subtitles on");
     }
 
@@ -1495,6 +1895,12 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         MaybeSaveResume();
         ShowPendingCaption();
         RefreshFromPlayer();
+        if (_cueOverlay)
+        {
+            PushCueOverlay();
+        }
+
+        OnPropertyChanged(nameof(OnScreenCaption));
     }
 
     private void ApplyHintDuration()
@@ -1626,6 +2032,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         OnPropertyChanged(nameof(VisiblePlaylist));
         OnPropertyChanged(nameof(CacheEndSeconds));
         OnPropertyChanged(nameof(OnScreenCaption));
+        RefreshTrackLabels();
     }
 
     private MediaPlaylist PlayingList => _playingStreams ? _streams : _playlist;
@@ -1770,6 +2177,11 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
                 QueueDirectCaptions(path, item);
             }
 
+            if (item is not null && ShouldAttachSidecars(item, path))
+            {
+                QueueAttachCaptions(item);
+            }
+
             return;
         }
 
@@ -1910,6 +2322,16 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
                     playable = playable.WithReferer(item.Referer);
                 }
 
+                if (item is not null &&
+                    item.CaptionTracks.Count == 0 &&
+                    StreamCatalog.TryReadDailymotion(path, out var dailyId))
+                {
+                    foreach (var cap in StreamCatalog.DailyCaptions(dailyId))
+                    {
+                        item.CaptionTracks.Add(cap);
+                    }
+                }
+
                 if (playable is not null && loadCaptions && playable.Kind != StreamKind.Live)
                 {
                     var attached = item?.CaptionUrl ?? playable.CaptionUrl;
@@ -1934,6 +2356,131 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             }
 
             OnUi(() => ApplyYouTube(path, item, playable, serial, caption));
+        });
+    }
+
+    private static bool ShouldAttachSidecars(PlaylistItem item, string path) =>
+        item.CaptionTracks.Count > 0 ||
+        StreamCatalog.TryReadDailymotion(path, out string _) ||
+        (!YouTubeCatalog.IsWatchUrl(path) &&
+         (StreamCatalog.LooksLikeHtmlPage(path) || StreamCatalog.LooksLikeHtmlPage(item.Referer)));
+
+    private void QueueAttachCaptions(PlaylistItem item)
+    {
+        if (_skipStreamCaptions)
+        {
+            return;
+        }
+
+        var serial = Volatile.Read(ref _openSerial);
+        var referer = item.Referer;
+        var page = StreamCatalog.LooksLikeHtmlPage(item.Path)
+            ? item.Path
+            : referer;
+        var incoming = item.CaptionTracks
+            .Where(entry => !string.IsNullOrWhiteSpace(entry.Url))
+            .ToList();
+
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            var caps = incoming;
+            if (caps.Count == 0 && StreamCatalog.TryReadDailymotion(item.Path, out var dailyId))
+            {
+                try
+                {
+                    caps = StreamCatalog.DailyCaptions(dailyId).ToList();
+                }
+                catch (Exception)
+                {
+                }
+            }
+
+            if (caps.Count == 0 &&
+                !string.IsNullOrWhiteSpace(page) &&
+                StreamCatalog.LooksLikeHtmlPage(page) &&
+                !StreamCatalog.TryReadDailymotion(page, out string _))
+            {
+                try
+                {
+                    caps = StreamCatalog.SidecarCaptionsFromPage(page).ToList();
+                }
+                catch (Exception)
+                {
+                }
+            }
+
+            var media = item.MediaUrl;
+            if (!string.IsNullOrWhiteSpace(media))
+            {
+                try
+                {
+                    foreach (var loaded in HlsCaptions.LoadAll(media, item.UserAgent, media))
+                    {
+                        if (caps.Any(cap => MediaLanguage.Matches(cap.Language, loaded.Language)))
+                        {
+                            continue;
+                        }
+
+                        caps.Add(new ExternalCaption(loaded.Language, loaded.File, loaded.Name));
+                    }
+                }
+                catch (Exception)
+                {
+                }
+            }
+
+            var files = new List<(string File, string Name, string Language)>();
+            foreach (var cap in caps)
+            {
+                try
+                {
+                    var file = StreamCaptionLoader.LoadSidecar(cap.Url, cap.Language, cap.Name, referer);
+                    if (!string.IsNullOrWhiteSpace(file) && File.Exists(file))
+                    {
+                        var name = string.IsNullOrWhiteSpace(cap.Name)
+                            ? (string.IsNullOrWhiteSpace(cap.Language) ? "Subtitle" : cap.Language)
+                            : cap.Name;
+                        files.Add((file, name, cap.Language));
+                    }
+                }
+                catch (Exception)
+                {
+                }
+            }
+
+            if (files.Count == 0)
+            {
+                return;
+            }
+
+            OnUi(() =>
+            {
+                if (serial != Volatile.Read(ref _openSerial) || _skipStreamCaptions)
+                {
+                    return;
+                }
+
+                if (item.CaptionTracks.Count == 0)
+                {
+                    item.CaptionTracks.AddRange(caps);
+                }
+
+                var keep = _subPicked ? _subCycle : -1;
+                _sidecars.Clear();
+                _sidecars.AddRange(files);
+                _subCycle = keep < files.Count ? keep : -1;
+                if (!StreamSubtitles.Enabled)
+                {
+                    _subCycle = -1;
+                    HideStreamSubtitles();
+                }
+                else if (_subPicked)
+                {
+                    ApplyCycledSubtitle();
+                }
+
+                RefreshTrackLabels();
+            });
         });
     }
 
@@ -2024,6 +2571,12 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             playable = playable.WithCaption(item.CaptionUrl);
         }
 
+        if (!LooksYouTubePlayable(path, playable) &&
+            string.IsNullOrWhiteSpace(item?.SubLang))
+        {
+            _subLang = null;
+        }
+
         var loadLang = StreamCaptionLoader.EffectiveLanguage(_subLang ?? playable.SubLang, captionUrl);
         if (string.IsNullOrWhiteSpace(captionFile) && File.Exists(captionUrl))
         {
@@ -2063,6 +2616,11 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
 
         _youtube = playable;
         OnPropertyChanged(nameof(StoryboardSpec));
+        if (StreamSubtitles.Enabled)
+        {
+            Subtitles.ClearRememberedOff();
+        }
+
         if (_skipStreamCaptions || !StreamSubtitles.Enabled)
         {
             if (_skipStreamCaptions)
@@ -2104,12 +2662,18 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         {
             Subtitles.AddFile(_captionFile, apply: true, attachTo: StreamCatalog.ContentKey(playable.VideoId));
             Subtitles.BindForMedia(_contentKey);
+            RememberStreamCaptionFile(_captionFile, loadLang, loadLang);
             ShowPendingCaption();
         }
 
         if (StreamSubtitles.Enabled && !_skipStreamCaptions && Subtitles.Applied is null)
         {
             StartCaptionLoad(playable);
+        }
+
+        if (item is not null && !_skipStreamCaptions && ShouldAttachSidecars(item, path))
+        {
+            QueueAttachCaptions(item);
         }
 
         SetYouTubePending(false);
@@ -2246,10 +2810,77 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
                 _captionAppliedSerial = 0;
                 Subtitles.AddFile(file, apply: true, attachTo: StreamCatalog.ContentKey(id));
                 Subtitles.BindForMedia(StreamCatalog.ContentKey(id));
+                RememberStreamCaptionFile(file, lang, lang);
                 Note("Subtitles loaded");
                 ShowPendingCaption();
             });
         });
+    }
+
+    private static bool LooksYouTubePlayable(string path, YouTubePlayable playable) =>
+        YouTubeCatalog.IsWatchUrl(path) ||
+        YouTubeCatalog.TryReadVideoId(playable.VideoId, out var id) &&
+        string.Equals(id, playable.VideoId, StringComparison.Ordinal);
+
+    private void HideStreamSubtitles()
+    {
+        _cueOverlay = false;
+        _player.ClearSubtitleFilter();
+        _player.SetAssOverlay(null);
+        _player.SetTrack("sub", null);
+        _player.SetSubtitleFile(null);
+    }
+
+    private void PushCueOverlay()
+    {
+        if (!_cueOverlay)
+        {
+            _player.SetAssOverlay(null);
+            return;
+        }
+
+        var text = OnScreenCaption;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            _player.SetAssOverlay(null);
+            return;
+        }
+
+        _player.SetAssOverlay(text.Replace('\r', ' ').Trim());
+    }
+
+    private void RememberStreamCaptionFile(string file, string? language, string? name)
+    {
+        if (string.IsNullOrWhiteSpace(file) || !File.Exists(file))
+        {
+            return;
+        }
+
+        var lang = MediaLanguage.Normalize(string.IsNullOrWhiteSpace(language) ? name : language, keepKind: true);
+        if (_sidecars.Any(item =>
+                string.Equals(item.File, file, StringComparison.OrdinalIgnoreCase) ||
+                (lang.Length > 0 && SameSubChoice(item.Language, lang))))
+        {
+            return;
+        }
+
+        var label = SubDisplayName(name, lang);
+        _sidecars.Add((file, string.IsNullOrWhiteSpace(label) ? "Subtitle" : label, lang));
+        if (!_subPicked && lang.Length > 0)
+        {
+            var choices = BuildSubChoices();
+            for (var i = 0; i < choices.Count; i++)
+            {
+                if (SameSubChoice(choices[i].Language, lang) ||
+                    MediaLanguage.MatchesName(lang, choices[i].Name))
+                {
+                    _subCycle = i;
+                    break;
+                }
+            }
+        }
+
+        RefreshTrackLabels();
     }
 
     private void ClearStreamCaptions(bool userOff = false)
@@ -2261,7 +2892,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         }
         else
         {
-            _player.SetSubtitleFile(null);
+            HideStreamSubtitles();
         }
     }
 
@@ -2272,15 +2903,23 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         // the new media's timeline (most visibly when switching VOD -> live).
         _captionFile = null;
         _captionAppliedSerial = 0;
+        _sidecars.Clear();
+        _subCycle = -1;
+        _subPicked = false;
+        _cueOverlay = false;
+        _player.ClearSubtitleFilter();
+        _player.SetAssOverlay(null);
         _player.SetSubtitleFile(null);
         Subtitles.BindForMedia(null);
         OnPropertyChanged(nameof(OnScreenCaption));
+        RefreshTrackLabels();
     }
 
     private void ShowPendingCaption()
     {
         if (!_playingStreams ||
             _skipStreamCaptions ||
+            _subPicked ||
             !StreamSubtitles.Enabled ||
             _captionAppliedSerial == Volatile.Read(ref _openSerial) ||
             string.IsNullOrWhiteSpace(_captionFile) ||
@@ -2355,6 +2994,17 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         if (item?.StreamKind == StreamKind.Live)
         {
             _isLive = true;
+            return;
+        }
+
+        if (StreamProbe.ClassifyUrl(path) == StreamKind.Live)
+        {
+            _isLive = true;
+            if (item is not null)
+            {
+                item.StreamKind = StreamKind.Live;
+            }
+
             return;
         }
 
