@@ -15,6 +15,7 @@ public sealed class FakeMpvNative : IMpvNative
     public bool IsTerminated { get; private set; }
     public bool ThrowOnCommand { get; set; }
     public bool AutoLoad { get; set; } = true;
+    public bool SeekReachesTarget { get; set; } = true;
     public double AutoDurationSeconds { get; set; } = 120;
     public string AutoHwdec { get; set; } = "d3d11va";
     public object AutoVid { get; set; } = 1L;
@@ -252,6 +253,11 @@ public sealed class FakeMpvNative : IMpvNative
         }
 
         seconds = Math.Max(0, seconds);
+        if (!SeekReachesTarget)
+        {
+            return;
+        }
+
         _properties["time-pos"] = seconds;
         Enqueue(MpvEvent.Property("time-pos", seconds, MpvFormat.Double));
         Enqueue(new MpvEvent { Id = MpvEventId.PlaybackRestart });

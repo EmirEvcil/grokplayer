@@ -84,6 +84,11 @@ public static class StreamCatalog
             return ResolveInstagram(instagramId, url, audioLang, subLang);
         }
 
+        if (TryReadPlayturka(url, out var playturkaId))
+        {
+            return ResolvePlayturka(playturkaId, url, audioLang, subLang);
+        }
+
         if (IsDirectMedia(url))
         {
             return ResolveDirect(url, audioLang, subLang);
@@ -1142,7 +1147,7 @@ public static class StreamCatalog
                 userAgent: ChromeUa,
                 audioLang: audioLang,
                 subLang: subLang,
-                referer: "https://www.dailymotion.com/");
+                referer: pageUrl);
             var captions = DailyCaptionTracks(root);
             var caption = DailyCaptionUrl(root, subLang) ?? captions.FirstOrDefault()?.Url;
             if (!string.IsNullOrWhiteSpace(caption))
@@ -1165,7 +1170,7 @@ public static class StreamCatalog
             return null;
         }
 
-        var html = GetText(url, ChromeUa, referer ?? url) ?? CurlText(url, referer ?? url);
+        var html = FetchHtml(url, referer ?? url);
         if (string.IsNullOrWhiteSpace(html))
         {
             return null;
@@ -1223,6 +1228,15 @@ public static class StreamCatalog
                     .Concat(AjaxPlayerEmbeds(document, url));
                 foreach (var embed in embeds.Distinct(StringComparer.Ordinal))
                 {
+                    if (TryReadPlayturka(embed, out var playturkaId))
+                    {
+                        var playturka = ResolvePlayturka(playturkaId, embed, audioLang, subLang);
+                        if (playturka is not null)
+                        {
+                            return playturka;
+                        }
+                    }
+
                     var nested = ResolvePage(embed, audioLang, subLang, depth + 1, url);
                     if (nested is not null)
                     {
@@ -1533,7 +1547,7 @@ public static class StreamCatalog
             return [];
         }
 
-        var html = GetText(url, ChromeUa, url);
+        var html = FetchHtml(url, url);
         if (string.IsNullOrWhiteSpace(html))
         {
             return [];
@@ -1549,7 +1563,16 @@ public static class StreamCatalog
         {
             try
             {
-                var nested = GetText(embed, ChromeUa, url);
+                if (TryReadPlayturka(embed, out var playturkaId))
+                {
+                    var fromPlayer = PlayturkaCaptions(playturkaId);
+                    if (fromPlayer.Count > 0)
+                    {
+                        return fromPlayer;
+                    }
+                }
+
+                var nested = FetchHtml(embed, url);
                 var found = SidecarCaptionsIn(nested);
                 if (found.Count > 0)
                 {
@@ -1624,6 +1647,11 @@ public static class StreamCatalog
             return;
         }
 
+        if (Regex.IsMatch(name + " " + url, @"forced|zorunlu", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            return;
+        }
+
         var language = MediaLanguage.Normalize(name);
         if (language.Length == 0 || MediaLanguage.IsOriginal(language))
         {
@@ -1690,6 +1718,17 @@ public static class StreamCatalog
             if (!list.Contains(uri.AbsoluteUri, StringComparer.Ordinal))
             {
                 list.Add(uri.AbsoluteUri);
+            }
+        }
+
+        foreach (Match hash in Regex.Matches(
+                     html,
+                     @"https?://p\.playturka\.space/#[A-Za-z0-9]+",
+                     RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            if (!list.Contains(hash.Value, StringComparer.OrdinalIgnoreCase))
+            {
+                list.Add(hash.Value);
             }
         }
 
@@ -2637,6 +2676,9 @@ public static class StreamCatalog
         }
     }
 
+    internal static string? FetchHtml(string url, string? referer) =>
+        GetText(url, ChromeUa, referer ?? url) ?? CurlText(url, referer ?? url);
+
     internal static string? GetText(string url, string? userAgent, string? referer)
     {
         try
@@ -2666,17 +2708,36 @@ public static class StreamCatalog
         }
     }
 
-    private static string? CurlText(string url, string? referer)
+    internal static string? CurlText(string url, string? referer)
     {
+        var bytes = CurlBytes(url, referer);
+        return bytes is { Length: > 0 } ? Encoding.UTF8.GetString(bytes) : null;
+    }
+
+    internal static byte[]? CurlBytes(string url, string? referer, string? userAgent = null, long? rangeStart = null, int? rangeLength = null)
+    {
+        var dest = Path.Combine(Path.GetTempPath(), "grok-curl-" + Guid.NewGuid().ToString("N"));
         try
         {
-            var args = "-sS -L --max-time 12 -A \"" + ChromeUa + "\"";
+            var args = "-sS -L --max-time 20 -A \"" + (userAgent ?? ChromeUa).Replace("\"", "", StringComparison.Ordinal) + "\"";
             if (!string.IsNullOrWhiteSpace(referer))
             {
-                args += " -H \"Referer: " + referer.Replace("\"", "", StringComparison.Ordinal) + "\"";
+                var page = referer.Replace("\"", "", StringComparison.Ordinal);
+                args += " -H \"Referer: " + page + "\"";
+                var origin = PageOrigin(page)?.TrimEnd('/');
+                if (!string.IsNullOrWhiteSpace(origin))
+                {
+                    args += " -H \"Origin: " + origin + "\"";
+                }
             }
 
-            args += " \"" + url + "\"";
+            args += " -H \"Accept: */*\"";
+            if (rangeStart is { } start && rangeLength is { } length)
+            {
+                args += " -r " + start + "-" + (start + length - 1);
+            }
+
+            args += " -o \"" + dest + "\" \"" + url + "\"";
             using var process = Process.Start(new ProcessStartInfo
             {
                 FileName = "curl.exe",
@@ -2691,18 +2752,27 @@ public static class StreamCatalog
                 return null;
             }
 
-            var text = process.StandardOutput.ReadToEnd();
-            if (!process.WaitForExit(13000))
+            if (!process.WaitForExit(22000))
             {
                 try { process.Kill(true); } catch (Exception) { }
                 return null;
             }
 
-            return string.IsNullOrWhiteSpace(text) ? null : text;
+            if (process.ExitCode != 0 || !File.Exists(dest))
+            {
+                return null;
+            }
+
+            var bytes = File.ReadAllBytes(dest);
+            return bytes.Length == 0 ? null : bytes;
         }
         catch (Exception)
         {
             return null;
+        }
+        finally
+        {
+            try { if (File.Exists(dest)) File.Delete(dest); } catch (Exception) { }
         }
     }
 
@@ -2884,6 +2954,208 @@ public static class StreamCatalog
         var fromPage = PickMediaUrl(MediaUrlsIn(html));
         return string.IsNullOrWhiteSpace(fromPage) ? null : fromPage;
     }
+
+    public static bool TryReadPlayturka(string? url, out string id)
+    {
+        id = "";
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+            !uri.Host.Contains("playturka", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var hash = uri.Fragment.TrimStart('#');
+        if (hash.Length >= 4 && hash.All(char.IsLetterOrDigit))
+        {
+            id = hash;
+            return true;
+        }
+
+        var query = uri.Query.TrimStart('?');
+        foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var parts = pair.Split('=', 2);
+            if (parts[0].Equals("id", StringComparison.OrdinalIgnoreCase) &&
+                parts.Length > 1 &&
+                parts[1].Length >= 4)
+            {
+                id = Uri.UnescapeDataString(parts[1]);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    internal static YouTubePlayable? ResolvePlayturka(string id, string pageUrl, string? audioLang, string? subLang)
+    {
+        var payload = PlayturkaPayload(id);
+        if (payload is null)
+        {
+            return null;
+        }
+
+        var media = payload.Value.Media;
+        if (string.IsNullOrWhiteSpace(media))
+        {
+            return null;
+        }
+
+        var referer = "https://p.playturka.space/#" + id;
+        var playable = new YouTubePlayable(
+            "playturka|" + id,
+            media,
+            UrlSanitizer.DisplayName(pageUrl),
+            StreamKind.Vod,
+            userAgent: ChromeUa,
+            audioLang: audioLang,
+            subLang: subLang,
+            referer: referer,
+            formatHint: "hls");
+        var caption = PickPlayturkaCaption(payload.Value.Captions, subLang);
+        return string.IsNullOrWhiteSpace(caption) ? playable : playable.WithCaption(caption);
+    }
+
+    public static IReadOnlyList<ExternalCaption> PlayturkaCaptions(string? id)
+    {
+        var payload = PlayturkaPayload(id);
+        return payload?.Captions ?? [];
+    }
+
+    private static (string Media, IReadOnlyList<ExternalCaption> Captions)? PlayturkaPayload(string? id)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            return null;
+        }
+
+        var href = "https://p.playturka.space/api/video-url?id=" + Uri.EscapeDataString(id);
+        var raw = FetchHtml(href, "https://p.playturka.space/#" + id);
+        var json = DecryptPlayturka(raw);
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.TryGetProperty("status", out var status) &&
+                status.ValueKind == JsonValueKind.String &&
+                !status.GetString()!.Equals("success", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+
+            if (!root.TryGetProperty("files", out var files) || files.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var media = ReadString(files, "masterUrl") ?? ReadString(files, "videoUrl");
+            var captions = new List<ExternalCaption>();
+            if (files.TryGetProperty("subtitles", out var subs) && subs.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var item in subs.EnumerateObject())
+                {
+                    var url = item.Value.ValueKind == JsonValueKind.String ? item.Value.GetString() : null;
+                    if (string.IsNullOrWhiteSpace(url))
+                    {
+                        continue;
+                    }
+
+                    captions.Add(new ExternalCaption(
+                        MediaLanguage.FromName(item.Name),
+                        url,
+                        item.Name));
+                }
+            }
+
+            return string.IsNullOrWhiteSpace(media) ? null : (media, captions);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static string? PickPlayturkaCaption(IReadOnlyList<ExternalCaption> captions, string? language)
+    {
+        if (captions.Count == 0)
+        {
+            return null;
+        }
+
+        var want = MediaLanguage.Normalize(language);
+        foreach (var cap in captions)
+        {
+            if (want.Length > 0 &&
+                (MediaLanguage.Matches(want, cap.Language) || MediaLanguage.MatchesName(want, cap.Name)))
+            {
+                return cap.Url;
+            }
+        }
+
+        foreach (var cap in captions)
+        {
+            if (MediaLanguage.Matches(cap.Language, "tr") || MediaLanguage.MatchesName("tr", cap.Name))
+            {
+                return cap.Url;
+            }
+        }
+
+        return captions[0].Url;
+    }
+
+    internal static string? DecryptPlayturka(string? cipher)
+    {
+        if (string.IsNullOrWhiteSpace(cipher) || cipher.Contains('<', StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var mapped = new StringBuilder(cipher.Length);
+        foreach (var ch in cipher.Trim())
+        {
+            mapped.Append(PlayturkaUnmap(ch));
+        }
+
+        var text = mapped.ToString();
+        var pad = text.Length % 4;
+        if (pad > 0)
+        {
+            text += new string('=', 4 - pad);
+        }
+
+        try
+        {
+            var bytes = Convert.FromBase64String(text);
+            return Encoding.UTF8.GetString(bytes);
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+    }
+
+    private static char PlayturkaUnmap(char ch) => ch switch
+    {
+        'A' => 'Z', 'B' => 'Y', 'C' => 'X', 'D' => 'W', 'E' => 'V', 'F' => 'U',
+        'G' => 'T', 'H' => 'S', 'I' => 'R', 'J' => 'Q', 'K' => 'P', 'L' => 'O',
+        'M' => 'N', 'N' => 'M', 'O' => 'L', 'P' => 'K', 'Z' => 'A', 'Y' => 'B',
+        'X' => 'C', 'W' => 'D', 'V' => 'E', 'U' => 'F', 'T' => 'G', 'S' => 'H',
+        'R' => 'I', 'Q' => 'J',
+        'a' => 'z', 'b' => 'y', 'c' => 'x', 'd' => 'w', 'e' => 'v', 'f' => 'u',
+        'g' => 't', 'h' => 's', 'i' => 'r', 'j' => 'q', 'k' => 'p', 'l' => 'o',
+        'm' => 'n', 'n' => 'm', 'o' => 'l', 'p' => 'k', 'z' => 'a', 'y' => 'b',
+        'x' => 'c', 'w' => 'd', 'v' => 'e', 'u' => 'f', 't' => 'g', 's' => 'h',
+        'r' => 'i', 'q' => 'j',
+        '0' => '5', '1' => '6', '2' => '7', '3' => '8', '4' => '9',
+        '5' => '0', '6' => '1', '7' => '2', '8' => '3', '9' => '4',
+        '-' => '+', '_' => '/',
+        _ => ch
+    };
 
     internal static IReadOnlyList<ExternalCaption> DailyCaptionTracks(JsonElement root)
     {
@@ -3074,7 +3346,38 @@ public static class StreamCatalog
         }
 
         var match = Regex.Match(html, @"<title[^>]*>([^<]+)</title>", RegexOptions.IgnoreCase);
-        return match.Success ? System.Net.WebUtility.HtmlDecode(match.Groups[1].Value).Trim() : null;
+        if (!match.Success)
+        {
+            return null;
+        }
+
+        var title = System.Net.WebUtility.HtmlDecode(match.Groups[1].Value).Trim();
+        return LooksLikeErrorTitle(title) ? null : title;
+    }
+
+    public static string UsableTitle(string? title, string? sourceUrl)
+    {
+        if (!LooksLikeErrorTitle(title))
+        {
+            return title!.Trim();
+        }
+
+        var fromUrl = UrlSanitizer.DisplayName(sourceUrl ?? "");
+        return string.IsNullOrWhiteSpace(fromUrl) ? "download" : fromUrl;
+    }
+
+    internal static bool LooksLikeErrorTitle(string? title)
+    {
+        var text = (title ?? "").Trim();
+        if (text.Length == 0)
+        {
+            return true;
+        }
+
+        return Regex.IsMatch(text, @"^\d{3}(\b|$)", RegexOptions.CultureInvariant) ||
+               text.Equals("Not Found", StringComparison.OrdinalIgnoreCase) ||
+               text.Equals("Forbidden", StringComparison.OrdinalIgnoreCase) ||
+               text.Equals("Error", StringComparison.OrdinalIgnoreCase);
     }
 
     public static string? PageOrigin(string? url) =>

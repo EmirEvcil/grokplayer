@@ -157,6 +157,41 @@ public static class HlsPlaylist
         return height;
     }
 
+    public static IReadOnlyList<(string Url, string Language, string Name)> AudioTracks(string text, string baseUrl)
+    {
+        var list = new List<(string Url, string Language, string Name)>();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return list;
+        }
+
+        foreach (var raw in text.Replace("\r", "").Split('\n'))
+        {
+            var line = raw.Trim();
+            if (!line.StartsWith("#EXT-X-MEDIA:", StringComparison.OrdinalIgnoreCase) ||
+                !line.Contains("TYPE=AUDIO", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var uri = Quoted(line, "URI") ?? AttributeValue(line, "URI");
+            if (string.IsNullOrWhiteSpace(uri))
+            {
+                continue;
+            }
+
+            var resolved = Resolve(baseUrl, uri);
+            if (list.Exists(item => string.Equals(item.Url, resolved, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            list.Add((resolved, AttributeValue(line, "LANGUAGE"), AttributeValue(line, "NAME")));
+        }
+
+        return list;
+    }
+
     public static string? AudioUri(string text, string baseUrl, string? language, string? group = null, bool fallback = true)
     {
         string? exact = null;

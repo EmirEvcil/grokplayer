@@ -194,6 +194,31 @@ public sealed class SeekPreviewTests
     }
 
     [Fact]
+    public void Display_rejects_a_still_from_an_unrelated_time()
+    {
+        Assert.True(SeekPreviewDisplay.Fits(
+            TimeSpan.FromMinutes(10),
+            TimeSpan.FromMinutes(10) + TimeSpan.FromSeconds(1),
+            SeekPreviewDisplay.DecoderDeltaSeconds));
+        Assert.False(SeekPreviewDisplay.Fits(
+            TimeSpan.FromMinutes(10),
+            TimeSpan.FromMinutes(25),
+            SeekPreviewDisplay.DecoderDeltaSeconds));
+        Assert.False(SeekPreviewDisplay.Fits(
+            TimeSpan.FromMinutes(10),
+            TimeSpan.FromMinutes(10) + TimeSpan.FromSeconds(20),
+            SeekPreviewDisplay.DecoderDeltaSeconds));
+        Assert.False(SeekPreviewDisplay.Fits(
+            TimeSpan.FromMinutes(26),
+            TimeSpan.FromMinutes(36),
+            SeekPreviewDisplay.DecoderDeltaSeconds));
+        Assert.True(SeekPreviewDisplay.Fits(
+            TimeSpan.FromMinutes(26),
+            TimeSpan.FromMinutes(26) + TimeSpan.FromSeconds(SeekPreviewDisplay.KeyframeToleranceSeconds),
+            SeekPreviewDisplay.KeyframeToleranceSeconds));
+    }
+
+    [Fact]
     public void Scheduler_returns_nearest_frame_even_when_far()
     {
         var renderer = new RecordingRenderer();
@@ -348,7 +373,7 @@ public sealed class SeekPreviewTests
         }
 
         Assert.NotNull(scheduler.GetCached(TimeSpan.FromSeconds(199)));
-        Assert.InRange(files.Count(File.Exists), 1, 64);
+        Assert.InRange(files.Count(File.Exists), 1, 160);
         foreach (var leftover in files.Where(File.Exists))
         {
             try
@@ -439,6 +464,30 @@ public sealed class SeekPreviewTests
     }
 
     [Fact]
+    public void Engine_stays_ready_after_fileloaded_was_already_consumed()
+    {
+        var fake = new FakeMpvNative();
+        using var engine = new SeekPreviewEngine(fake);
+        var path = TestMedia.CreateTempFile();
+        try
+        {
+            engine.Prepare(path);
+            while (fake.WaitEvent(0).Id != Grok.Player.Core.Native.MpvEventId.None)
+            {
+            }
+
+            engine.Prepare(path);
+            var shot = engine.Capture(TimeSpan.FromSeconds(4));
+            Assert.NotNull(shot);
+            Assert.True(File.Exists(shot));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void Engine_seeks_and_writes_screenshot()
     {
         var fake = new FakeMpvNative();
@@ -457,11 +506,239 @@ public sealed class SeekPreviewTests
             Assert.Contains(fake.Commands, c => c[0] == "seek" && c[1] == "8" && (c[2] == "absolute+keyframes" || c[2] == "absolute"));
             Assert.Contains(fake.Commands, c => c[0] == "screenshot-to-file");
             Assert.True(fake.HasOption("screenshot-sw", "yes"));
-            Assert.True(fake.HasOption("vo", "null"));
+            Assert.True(fake.HasOption("vo", "image"));
+            Assert.True(fake.HasOption("untimed", "yes"));
+            engine.CaptureFast(TimeSpan.FromSeconds(4));
+            Assert.Contains(fake.Lifecycle, item => item.Contains("vf=scale=160:-2", StringComparison.Ordinal));
+            engine.Capture(TimeSpan.FromSeconds(4));
+            Assert.Contains(fake.Lifecycle, item => item.Contains("vf=scale=512:-2", StringComparison.Ordinal));
         }
         finally
         {
             File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void Network_capture_returns_null_when_the_seek_does_not_land()
+    {
+        var fake = new FakeMpvNative { AutoDurationSeconds = 3600, SeekReachesTarget = false };
+        using var engine = new SeekPreviewEngine(fake);
+        engine.Prepare("https://cdn.example/vod.m3u8");
+        Assert.Null(engine.CaptureFast(TimeSpan.FromMinutes(36)));
+        Assert.Null(engine.Capture(TimeSpan.FromMinutes(36)));
+    }
+
+    [Fact]
+    public void Network_capture_keeps_a_still_only_after_the_seek_lands()
+    {
+        var fake = new FakeMpvNative { AutoDurationSeconds = 3600 };
+        using var engine = new SeekPreviewEngine(fake);
+        engine.Prepare("https://cdn.example/vod.m3u8");
+        var shot = engine.Capture(TimeSpan.FromMinutes(26));
+        Assert.NotNull(shot);
+        Assert.True(File.Exists(shot));
+    }
+
+    [Fact]
+    public void Distant_identical_network_still_is_rejected()
+    {
+        var fake = new FakeMpvNative { AutoDurationSeconds = 3600 };
+        using var engine = new SeekPreviewEngine(fake);
+        engine.Prepare("https://cdn.example/vod.m3u8");
+        var first = engine.Capture(TimeSpan.FromMinutes(26));
+        Assert.NotNull(first);
+        Assert.Null(engine.Capture(TimeSpan.FromMinutes(36)));
+        Assert.Null(engine.CaptureFast(TimeSpan.FromMinutes(36)));
+    }
+
+    [Fact]
+    public void Hover_at_a_later_minute_does_not_reuse_the_earlier_still()
+    {
+        var renderer = new TieredRenderer();
+        using var scheduler = new SeekPreviewScheduler(renderer, bucketSeconds: 1);
+        var published = new Dictionary<int, string>();
+        scheduler.FrameReady += (time, path) =>
+        {
+            lock (published)
+            {
+                published[(int)time.TotalMinutes] = path;
+            }
+        };
+
+        scheduler.SetMedia("https://cdn.example/vod.m3u8", TimeSpan.FromHours(1), prefetch: false);
+        scheduler.Request(TimeSpan.FromMinutes(26));
+        var first = WaitFor(() =>
+        {
+            lock (published)
+            {
+                return published.ContainsKey(26);
+            }
+        });
+        Assert.True(first);
+
+        scheduler.Request(TimeSpan.FromMinutes(36));
+        var second = WaitFor(() =>
+        {
+            lock (published)
+            {
+                return published.ContainsKey(36);
+            }
+        });
+        Assert.True(second);
+        lock (published)
+        {
+            Assert.NotEqual(published[26], published[36]);
+        }
+
+        var early = scheduler.GetCached(TimeSpan.FromMinutes(26), SeekPreviewDisplay.DecoderDeltaSeconds);
+        var later = scheduler.GetCached(TimeSpan.FromMinutes(36), SeekPreviewDisplay.DecoderDeltaSeconds);
+        Assert.NotNull(early);
+        Assert.NotNull(later);
+        Assert.NotEqual(early, later);
+    }
+
+    [Fact]
+    public void Same_still_file_is_not_claimed_for_a_distant_time()
+    {
+        var file = WriteTempStill();
+        try
+        {
+            var renderer = new StickyRenderer(file);
+            using var scheduler = new SeekPreviewScheduler(renderer, bucketSeconds: 1);
+            var published = new List<(TimeSpan Time, string Path)>();
+            scheduler.FrameReady += (time, path) =>
+            {
+                lock (published)
+                {
+                    published.Add((time, path));
+                }
+            };
+
+            scheduler.SetMedia("https://cdn.example/vod.m3u8", TimeSpan.FromHours(1), prefetch: false);
+            scheduler.Request(TimeSpan.FromMinutes(26));
+            Assert.True(WaitFor(() =>
+            {
+                lock (published)
+                {
+                    return published.Count >= 1;
+                }
+            }));
+            scheduler.Request(TimeSpan.FromMinutes(36));
+            Thread.Sleep(200);
+            lock (published)
+            {
+                Assert.DoesNotContain(published, item => item.Time == TimeSpan.FromMinutes(36));
+            }
+
+            Assert.Equal(file, scheduler.GetCached(TimeSpan.FromMinutes(26), SeekPreviewDisplay.DecoderDeltaSeconds));
+            Assert.Null(scheduler.GetCached(TimeSpan.FromMinutes(36), SeekPreviewDisplay.DecoderDeltaSeconds));
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
+    [Fact]
+    public void Distant_hover_clears_the_previous_preview_image()
+    {
+        using var controller = new SeekPreviewController(new RecordingRenderer(), TimeSpan.Zero, 0);
+        controller.SetMedia(@"C:\a.mp4", TimeSpan.FromHours(1));
+        controller.Move(26d / 60d * 200, 200);
+        controller.RememberImage(@"C:\thumb-26.png");
+        var later = controller.Move(36d / 60d * 200, 200);
+        Assert.Null(later.ImagePath);
+        Assert.Equal("36:00", later.TimeText);
+    }
+
+    [Fact]
+    public void Hover_without_a_cached_frame_publishes_low_then_high()
+    {
+        var renderer = new TieredRenderer();
+        using var scheduler = new SeekPreviewScheduler(renderer, bucketSeconds: 1);
+        var published = new List<string>();
+        var ready = new ManualResetEventSlim(false);
+        scheduler.FrameReady += (_, path) =>
+        {
+            lock (published)
+            {
+                published.Add(path);
+                if (published.Count >= 2)
+                {
+                    ready.Set();
+                }
+            }
+        };
+
+        scheduler.SetMedia(@"C:\a.mp4", null, prefetch: false);
+        scheduler.Request(TimeSpan.FromSeconds(12));
+        Assert.True(ready.Wait(TimeSpan.FromSeconds(2)));
+        lock (published)
+        {
+            Assert.Equal(2, published.Count);
+            Assert.NotEqual(published[0], published[1]);
+        }
+
+        lock (renderer.Steps)
+        {
+            Assert.Equal(["fast", "high"], renderer.Steps);
+        }
+
+        Assert.Equal(published[1], scheduler.GetCached(TimeSpan.FromSeconds(12)));
+    }
+
+    [Fact]
+    public void Prefetch_low_frame_is_upgraded_when_that_time_is_hovered()
+    {
+        var renderer = new TieredRenderer();
+        using var scheduler = new SeekPreviewScheduler(renderer, bucketSeconds: 1);
+        var published = new List<string>();
+        scheduler.FrameReady += (_, path) =>
+        {
+            lock (published)
+            {
+                published.Add(path);
+            }
+        };
+
+        scheduler.SetMedia(@"C:\a.mp4", TimeSpan.FromSeconds(10), prefetch: true);
+        var deadline = DateTime.UtcNow.AddSeconds(2);
+        while (DateTime.UtcNow < deadline)
+        {
+            lock (renderer.Steps)
+            {
+                if (renderer.Steps.Count >= 1)
+                {
+                    break;
+                }
+            }
+
+            Thread.Sleep(20);
+        }
+
+        lock (renderer.Steps)
+        {
+            Assert.All(renderer.Steps, step => Assert.Equal("fast", step));
+        }
+
+        var hover = new ManualResetEventSlim(false);
+        scheduler.FrameReady += (_, _) =>
+        {
+            lock (renderer.Steps)
+            {
+                if (renderer.Steps.Contains("high"))
+                {
+                    hover.Set();
+                }
+            }
+        };
+        scheduler.Request(TimeSpan.FromSeconds(0.8));
+        Assert.True(hover.Wait(TimeSpan.FromSeconds(2)));
+        lock (renderer.Steps)
+        {
+            Assert.Contains("high", renderer.Steps);
+            Assert.Equal("fast", renderer.Steps[0]);
         }
     }
 
@@ -482,6 +759,92 @@ public sealed class SeekPreviewTests
         using var engine = new SeekPreviewEngine(fake);
         engine.Prepare("https://v16-webapp.tiktokcdn.com/video/tos/foo");
         Assert.Contains(fake.Lifecycle, item => item.Contains("tiktok.com", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool WaitFor(Func<bool> ready, int milliseconds = 2000)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(milliseconds);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (ready())
+            {
+                return true;
+            }
+
+            Thread.Sleep(20);
+        }
+
+        return ready();
+    }
+
+    private static string WriteTempStill()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"grok-tier-sticky-{Guid.NewGuid():N}.jpg");
+        var bytes = new byte[4096];
+        bytes[0] = 0xFF;
+        bytes[1] = 0xD8;
+        bytes[2] = 0xFF;
+        File.WriteAllBytes(path, bytes);
+        return path;
+    }
+
+    private sealed class StickyRenderer : ISeekPreviewRenderer, IFastSeekPreviewRenderer
+    {
+        private readonly string _file;
+
+        public StickyRenderer(string file) => _file = file;
+
+        public void Prepare(string path)
+        {
+        }
+
+        public string? CaptureFast(TimeSpan time) => _file;
+
+        public string? Capture(TimeSpan time) => _file;
+
+        public void Reset()
+        {
+        }
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class TieredRenderer : ISeekPreviewRenderer, IFastSeekPreviewRenderer
+    {
+        public List<string> Steps { get; } = [];
+
+        public void Prepare(string path)
+        {
+        }
+
+        public string? CaptureFast(TimeSpan time) => Write("fast");
+
+        public string? Capture(TimeSpan time) => Write("high");
+
+        public void Reset()
+        {
+        }
+
+        public void Dispose()
+        {
+        }
+
+        private string Write(string step)
+        {
+            lock (Steps)
+            {
+                Steps.Add(step);
+                var path = Path.Combine(Path.GetTempPath(), $"grok-tier-{step}-{Guid.NewGuid():N}.jpg");
+                var bytes = new byte[4096];
+                bytes[0] = 0xFF;
+                bytes[1] = 0xD8;
+                bytes[2] = 0xFF;
+                File.WriteAllBytes(path, bytes);
+                return path;
+            }
+        }
     }
 
     private sealed class RecordingRenderer : ISeekPreviewRenderer

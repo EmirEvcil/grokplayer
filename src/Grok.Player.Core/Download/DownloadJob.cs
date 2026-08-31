@@ -37,6 +37,11 @@ public sealed class DownloadJob
     public string? AudioLang { get; set; }
     public string? SubLang { get; set; }
     public string? CaptionUrl { get; set; }
+    public string? Referer { get; set; }
+
+    public List<Grok.Player.Core.Launch.ExternalCaption> Captions { get; } = [];
+
+    public List<(string Url, string Language, string Name)> AudioTracks { get; } = [];
 
     public double Progress
     {

@@ -134,16 +134,26 @@ public sealed class StoryboardTests
     }
 
     [Fact]
-    public void Network_prefetch_does_not_fill_the_start_of_the_video()
+    public void Network_vod_prefetch_starts_coverage_without_a_hover()
     {
         var renderer = new RecordingRenderer();
         using var scheduler = new SeekPreviewScheduler(renderer, bucketSeconds: 1);
         scheduler.SetMedia("https://cdn.example/vod.m3u8", TimeSpan.FromSeconds(600), prefetch: true);
-        Thread.Sleep(250);
-        lock (renderer.Times)
+        var until = DateTime.UtcNow.AddSeconds(2);
+        while (DateTime.UtcNow < until)
         {
-            Assert.Empty(renderer.Times);
+            lock (renderer.Times)
+            {
+                if (renderer.Times.Count > 0)
+                {
+                    return;
+                }
+            }
+
+            Thread.Sleep(20);
         }
+
+        Assert.Fail("Decoder-only VOD coverage never started.");
     }
 
     [Fact]

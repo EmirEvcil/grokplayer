@@ -17,12 +17,46 @@ if (args.Length > 0 && args[0] == "overlay-check")
 }
 if (args.Length > 0 && args[0] == "transfer")
     return TransferEndurance.Run(args);
+if (args.Length > 1 && args[0] == "dump-html")
+{
+    var page = args[1];
+    var referer = args.Length > 2 ? args[2] : page;
+    var html = StreamCatalog.GetText(page, StreamCatalog.ChromeUa, referer) ?? "";
+    Console.WriteLine("html=" + html.Length);
+    var path = Path.Combine(Path.GetTempPath(), "grok-dump.html");
+    File.WriteAllText(path, html);
+    Console.WriteLine("dump=" + path);
+    foreach (var embed in StreamCatalog.PlayerEmbedsIn(html, page).Take(8))
+    {
+        Console.WriteLine("embed " + embed);
+    }
+    foreach (var media in StreamCatalog.MediaUrlsIn(html).Take(12))
+    {
+        Console.WriteLine("media " + media);
+    }
+    foreach (var cap in StreamCatalog.SidecarCaptionsIn(html))
+    {
+        Console.WriteLine("cap " + cap.Language + " | " + cap.Name + " | " + cap.Url);
+    }
+    return 0;
+}
+if (args.Length > 0 && args[0] == "preview-vod")
+{
+    return PreviewVodCheck.Run(args);
+}
+
+if (args.Length > 0 && args[0] == "dl-check")
+{
+    return DownloadCheck.Run(args);
+}
+
 if (args.Length > 1 && args[0] == "catalog")
 {
     var resolved = StreamCatalog.Resolve(args[1]);
     Console.WriteLine(resolved is null ? "RESOLVE_NULL" : $"id={resolved.VideoId}\nkind={resolved.Kind}\ntitle={resolved.Title}\nmedia={resolved.MediaUrl}\nreferer={resolved.Referer}\nformat={resolved.FormatHint}\nheaders={resolved.HttpHeaders}");
     return resolved is null ? 2 : 0;
 }
+
 if (args.Length > 1 && args[0] == "catalog-app")
 {
     var resolved = StreamCatalog.Resolve(args[1]);

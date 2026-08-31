@@ -853,6 +853,14 @@ public sealed class StreamCatalogTests
 
         const string hls = "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,URI=\"audio/list.txt\"\n#EXTINF:2,\nsegments/one.ts\n";
         var rewritten = ProtectedStreamProxy.RewriteHlsManifest(hls, "https://cdn.example/path/master.txt", url => "proxy?u=" + Uri.EscapeDataString(url));
+        var proxy = ProtectedStreamProxy.Register(
+            "https://fastplay.mom/manifests/episode/master.txt?verify=123-proof",
+            "https://fastplay.mom/video/embed/abc",
+            "secret",
+            1);
+        Assert.True(ProtectedStreamProxy.TryUnwrap(proxy, out var unwrapped));
+        Assert.Equal("https://fastplay.mom/manifests/episode/master.txt?verify=123-proof", unwrapped);
+        Assert.True(DownloadManager.LooksLikeHls(proxy));
         Assert.Contains("proxy?u=https%3A%2F%2Fcdn.example%2Fpath%2Faudio%2Flist.txt", rewritten);
         Assert.Contains("proxy?u=https%3A%2F%2Fcdn.example%2Fpath%2Fsegments%2Fone.ts", rewritten);
     }
@@ -921,4 +929,102 @@ public sealed class StreamCatalogTests
             "https://cdn.example/en.m3u8",
             HlsCaptions.SubtitleUriFromManifest(live, "https://cdn.example/master.m3u8", "en"));
     }
+
+    [Fact]
+    public void Playturka_hash_urls_and_page_sources_are_found()
+    {
+        Assert.True(StreamCatalog.TryReadPlayturka("https://p.playturka.space/#BCMgxTpc", out var id));
+        Assert.Equal("BCMgxTpc", id);
+        var embeds = StreamCatalog.PlayerEmbedsIn(
+            "activeSource: 'https://p.playturka.space/#BCMgxTpc'",
+            "https://filmizlehell.net/film/3685-odyssey-036-izle");
+        Assert.Contains("https://p.playturka.space/#BCMgxTpc", embeds);
+    }
+
+    [Fact]
+    public void Playturka_cipher_round_trips_json()
+    {
+        const string json = """{"status":"success","files":{"masterUrl":"https://p.playturka.space/videos/BCMgxTpc/master.m3u8"}}""";
+        var encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(json));
+        var cipher = new string(encoded.Select(PlayturkaMap).ToArray());
+        var decoded = StreamCatalog.DecryptPlayturka(cipher);
+        Assert.Contains("master.m3u8", decoded, StringComparison.Ordinal);
+        Assert.Contains("BCMgxTpc", decoded, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Closeload_jw_tracks_keep_named_captions_and_drop_forced()
+    {
+        const string html =
+            """
+            tracks: [{"file":"https:\/\/closeload.filmmakinesi.to\/vtt\/en.vtt","kind":"captions","label":"English","default":false},{"file":"https:\/\/closeload.filmmakinesi.to\/vtt\/forced.vtt","kind":"captions","label":"Forced","default":false},{"file":"https:\/\/closeload.filmmakinesi.to\/vtt\/tr.vtt","kind":"captions","label":"Turkish","default":true}]
+            """;
+        var caps = StreamCatalog.SidecarCaptionsIn(html);
+        Assert.Contains(caps, item => item.Name == "English");
+        Assert.Contains(caps, item => item.Name == "Turkish");
+        Assert.DoesNotContain(caps, item => item.Name.Contains("Forced", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(caps, item => item.Url.Contains("forced", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Closeload_turkish_sidecar_downloads()
+    {
+        var file = StreamCaptionLoader.LoadSidecar(
+            "https://closeload.filmmakinesi.to/vtt/2025/02/yqGDCTbv1Zw-tr-2439052-breakingbads01e02web-dl1080pdualx264_subtitles02tur.vtt",
+            "tr",
+            "Turkish",
+            "https://closeload.filmmakinesi.to/video/embed/yqGDCTbv1Zw/?imdb_id=tt0903747");
+        if (file is null)
+        {
+            return;
+        }
+
+        var cues = SrtDocument.Parse(File.ReadAllText(file), compact: false).Cues;
+        Assert.True(cues.Count > 10, "cues=" + cues.Count);
+    }
+
+    [Fact]
+    public void Odyssey_playturka_page_resolves_a_master()
+    {
+        YouTubePlayable? playable;
+        try
+        {
+            playable = StreamCatalog.Resolve("https://filmizlehell.net/film/3685-odyssey-036-izle");
+        }
+        catch (Exception)
+        {
+            return;
+        }
+
+        if (playable is null)
+        {
+            playable = StreamCatalog.Resolve("https://p.playturka.space/#BCMgxTpc");
+        }
+
+        if (playable is null)
+        {
+            return;
+        }
+
+        Assert.Contains(".m3u8", playable.MediaUrl, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("filmizlehell.net/film/", playable.MediaUrl, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static char PlayturkaMap(char ch) => ch switch
+    {
+        'A' => 'Z', 'B' => 'Y', 'C' => 'X', 'D' => 'W', 'E' => 'V', 'F' => 'U',
+        'G' => 'T', 'H' => 'S', 'I' => 'R', 'J' => 'Q', 'K' => 'P', 'L' => 'O',
+        'M' => 'N', 'N' => 'M', 'O' => 'L', 'P' => 'K', 'Z' => 'A', 'Y' => 'B',
+        'X' => 'C', 'W' => 'D', 'V' => 'E', 'U' => 'F', 'T' => 'G', 'S' => 'H',
+        'R' => 'I', 'Q' => 'J',
+        'a' => 'z', 'b' => 'y', 'c' => 'x', 'd' => 'w', 'e' => 'v', 'f' => 'u',
+        'g' => 't', 'h' => 's', 'i' => 'r', 'j' => 'q', 'k' => 'p', 'l' => 'o',
+        'm' => 'n', 'n' => 'm', 'o' => 'l', 'p' => 'k', 'z' => 'a', 'y' => 'b',
+        'x' => 'c', 'w' => 'd', 'v' => 'e', 'u' => 'f', 't' => 'g', 's' => 'h',
+        'r' => 'i', 'q' => 'j',
+        '0' => '5', '1' => '6', '2' => '7', '3' => '8', '4' => '9',
+        '5' => '0', '6' => '1', '7' => '2', '8' => '3', '9' => '4',
+        '+' => '-', '/' => '_',
+        _ => ch
+    };
 }

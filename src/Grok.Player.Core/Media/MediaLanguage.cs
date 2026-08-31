@@ -191,30 +191,71 @@ public static class MediaLanguage
         return SameIsoLanguage(want, have);
     }
 
-    private static bool SameIsoLanguage(string left, string right)
+    public static string DisplayName(string? value)
     {
-        static string Fold(string value)
+        var code = Normalize(value);
+        if (code.Length == 0)
         {
-            value = value.Trim().ToLowerInvariant();
-            return value switch
-            {
-                "ger" or "deu" => "de",
-                "tur" or "trk" => "tr",
-                "eng" => "en",
-                "fra" or "fre" => "fr",
-                "spa" => "es",
-                "ita" => "it",
-                "por" => "pt",
-                "jpn" => "ja",
-                "kor" => "ko",
-                "chi" or "zho" => "zh",
-                "ara" => "ar",
-                "rus" => "ru",
-                _ => value.Length > 2 ? value[..2] : value
-            };
+            return "";
         }
 
-        return Fold(left) == Fold(right);
+        if (Matches(code, "tr"))
+        {
+            return "Türkçe";
+        }
+
+        if (Matches(code, "en"))
+        {
+            return "English";
+        }
+
+        try
+        {
+            var name = CultureInfo.GetCultureInfo(code).EnglishName;
+            var cut = name.IndexOf('(');
+            return cut > 0 ? name[..cut].Trim() : name;
+        }
+        catch (CultureNotFoundException)
+        {
+            return code;
+        }
+    }
+
+    public static string ShortCode(string? value)
+    {
+        var lang = Normalize(value, keepKind: true);
+        if (lang.Length == 0 || IsOriginal(lang))
+        {
+            return "";
+        }
+
+        var kind = Kind(lang);
+        var core = FoldIso(Normalize(lang));
+        return string.IsNullOrWhiteSpace(kind) ? core : core + ":" + kind;
+    }
+
+    private static bool SameIsoLanguage(string left, string right) =>
+        FoldIso(left) == FoldIso(right);
+
+    internal static string FoldIso(string value)
+    {
+        value = value.Trim().ToLowerInvariant();
+        return value switch
+        {
+            "ger" or "deu" => "de",
+            "tur" or "trk" => "tr",
+            "eng" => "en",
+            "fra" or "fre" => "fr",
+            "spa" => "es",
+            "ita" => "it",
+            "por" => "pt",
+            "jpn" => "ja",
+            "kor" => "ko",
+            "chi" or "zho" => "zh",
+            "ara" => "ar",
+            "rus" => "ru",
+            _ => value.Length > 2 ? value[..2] : value
+        };
     }
 
     public static bool MatchesName(string? requested, string? name)

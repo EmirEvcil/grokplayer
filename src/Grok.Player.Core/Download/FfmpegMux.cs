@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Grok.Player.Core.Media;
 
 namespace Grok.Player.Core.Download;
 
@@ -6,7 +7,30 @@ internal static class FfmpegMux
 {
     internal static string? LastError { get; private set; }
 
-    public static bool TryRemux(string video, string? audio, string output)
+    public static bool TryRemux(string video, string? audio, string output, IReadOnlyList<string>? extraAudio = null)
+    {
+        var extras = extraAudio ?? [];
+        var labeled = new List<(string Path, string Language, string Name)>();
+        if (!string.IsNullOrWhiteSpace(audio) && File.Exists(audio))
+        {
+            labeled.Add((audio, "", ""));
+        }
+
+        foreach (var extra in extras)
+        {
+            if (File.Exists(extra))
+            {
+                labeled.Add((extra, "", ""));
+            }
+        }
+
+        return TryRemux(video, labeled, output);
+    }
+
+    public static bool TryRemux(
+        string video,
+        IReadOnlyList<(string Path, string Language, string Name)> audio,
+        string output)
     {
         LastError = null;
         var ffmpeg = Find();
@@ -17,12 +41,32 @@ internal static class FfmpegMux
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(output)!);
-        string[] attempts = string.IsNullOrWhiteSpace(audio)
+        var tracks = (audio ?? [])
+            .Where(item => !string.IsNullOrWhiteSpace(item.Path) && File.Exists(item.Path))
+            .DistinctBy(item => item.Path, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var inputs = new List<string> { "-hide_banner -y -i \"" + video + "\"" };
+        foreach (var track in tracks)
+        {
+            inputs.Add("-i \"" + track.Path + "\"");
+        }
+
+        var maps = new List<string> { "-map 0:v:0" };
+        for (var i = 1; i < inputs.Count; i++)
+        {
+            maps.Add("-map " + i + ":a:0?");
+        }
+
+        var meta = AudioMetadataArgs(tracks);
+        var labeled = string.Join(' ', inputs) + " " + string.Join(' ', maps) + meta +
+                      " -c copy -shortest \"" + output + "\"";
+        var first = tracks.Count > 0 ? tracks[0].Path : null;
+        string[] attempts = tracks.Count == 0
             ? [$"-hide_banner -y -i \"{video}\" -c copy \"{output}\""]
             :
             [
-                $"-hide_banner -y -i \"{video}\" -i \"{audio}\" -map 0:v:0 -map 1:a:0 -c copy -shortest \"{output}\"",
-                $"-hide_banner -y -i \"{video}\" -i \"{audio}\" -c copy -shortest \"{output}\""
+                labeled,
+                $"-hide_banner -y -i \"{video}\" -i \"{first}\" -map 0:v:0 -map 1:a:0 -c copy -shortest \"{output}\""
             ];
 
         foreach (var args in attempts)
@@ -35,6 +79,32 @@ internal static class FfmpegMux
 
         LastError ??= "ffmpeg remux failed";
         return false;
+    }
+
+    internal static string AudioMetadataArgs(IReadOnlyList<(string Path, string Language, string Name)> tracks)
+    {
+        var parts = new List<string>();
+        for (var i = 0; i < tracks.Count; i++)
+        {
+            var lang = MediaLanguage.Normalize(tracks[i].Language);
+            if (lang.Length == 0)
+            {
+                lang = MediaLanguage.FromName(tracks[i].Name);
+            }
+
+            if (lang.Length > 0)
+            {
+                parts.Add("-metadata:s:a:" + i + " language=" + lang);
+            }
+
+            var title = string.IsNullOrWhiteSpace(tracks[i].Name) ? lang : tracks[i].Name.Trim();
+            if (!string.IsNullOrWhiteSpace(title))
+            {
+                parts.Add("-metadata:s:a:" + i + " title=\"" + title.Replace("\"", "'", StringComparison.Ordinal) + "\"");
+            }
+        }
+
+        return parts.Count == 0 ? "" : " " + string.Join(' ', parts);
     }
 
     internal static string? Find()

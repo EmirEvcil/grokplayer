@@ -91,7 +91,7 @@ public static class UrlSanitizer
             return url.Trim();
         }
 
-        var name = Path.GetFileName(uri.AbsolutePath);
+        var name = Path.GetFileName(uri.AbsolutePath.TrimEnd('/'));
         if (string.IsNullOrWhiteSpace(name) || name is "/" or ".")
         {
             return uri.Host;

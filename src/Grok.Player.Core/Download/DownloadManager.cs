@@ -1,3 +1,4 @@
+using Grok.Player.Core.Launch;
 using Grok.Player.Core.Media;
 using Grok.Player.Core.Playlist;
 using Grok.Player.Core.Subtitles;
@@ -19,9 +20,8 @@ public sealed class DownloadManager : IDisposable
         _http = handler is null
             ? new HttpClient { Timeout = TimeSpan.FromMinutes(5) }
             : new HttpClient(handler, disposeHandler: false) { Timeout = TimeSpan.FromMinutes(5) };
-        _http.DefaultRequestHeaders.TryAddWithoutValidation(
-            "User-Agent",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15");
+        _http.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "*/*");
+        _http.DefaultRequestHeaders.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
     }
 
     public DownloadSettings Settings { get; }
@@ -67,9 +67,10 @@ public sealed class DownloadManager : IDisposable
         string? audioLang = null,
         int maxHeight = 0,
         string? subLang = null,
-        string? captionUrl = null)
+        string? captionUrl = null,
+        IEnumerable<ExternalCaption>? captions = null)
     {
-        return EnqueueCore(sourceUrl, title, start, audioLang, maxHeight, subLang, captionUrl);
+        return EnqueueCore(sourceUrl, title, start, audioLang, maxHeight, subLang, captionUrl, captions);
     }
 
     public DownloadJob EnqueueCore(
@@ -79,9 +80,11 @@ public sealed class DownloadManager : IDisposable
         string? audioLang,
         int maxHeight = 0,
         string? subLang = null,
-        string? captionUrl = null)
+        string? captionUrl = null,
+        IEnumerable<ExternalCaption>? captions = null)
     {
         Directory.CreateDirectory(Settings.Folder);
+        title = StreamCatalog.UsableTitle(title, sourceUrl);
         var name = DownloadJob.SafeFileName(title);
         var path = UniquePath(Path.Combine(Settings.Folder, name + Settings.ContainerExtension));
         var job = new DownloadJob(sourceUrl, title, path)
@@ -91,6 +94,10 @@ public sealed class DownloadManager : IDisposable
             SubLang = subLang,
             CaptionUrl = captionUrl
         };
+        if (captions is not null)
+        {
+            job.Captions.AddRange(captions);
+        }
         lock (_gate)
         {
             _jobs.Add(job);
@@ -293,17 +300,23 @@ public sealed class DownloadManager : IDisposable
             Directory.CreateDirectory(Path.GetDirectoryName(job.OutputPath)!);
             var source = job.SourceUrl;
             string? userAgent = null;
-            if (YouTubeCatalog.IsWatchUrl(source))
+            string? formatHint = null;
+            if (YouTubeCatalog.IsWatchUrl(source) || StreamCatalog.LooksResolvable(source))
             {
-                var playable = YouTubeCatalog.Resolve(source, null, job.AudioLang, null);
+                var playable = YouTubeCatalog.IsWatchUrl(source)
+                    ? YouTubeCatalog.Resolve(source, null, job.AudioLang, job.SubLang)
+                    : StreamCatalog.Resolve(source, job.AudioLang, job.SubLang);
                 if (playable is null || playable.Kind == StreamKind.Live)
                 {
-                    Fail(job, playable is null ? "YouTube stream unavailable" : "Live streams cannot be downloaded");
+                    Fail(job, playable is null ? "Stream unavailable" : "Live streams cannot be downloaded");
                     return;
                 }
 
+                HarvestCaptions(job, source);
                 source = playable.MediaUrl;
                 userAgent = playable.UserAgent;
+                formatHint = playable.FormatHint;
+                job.Referer = PageReferer(playable.Referer, job.SourceUrl);
                 job.AudioLang ??= playable.AudioLang;
                 job.CaptionUrl ??= playable.CaptionUrl;
                 if (string.IsNullOrWhiteSpace(job.SubLang))
@@ -312,18 +325,33 @@ public sealed class DownloadManager : IDisposable
                 }
             }
 
+            job.Referer = PageReferer(job.Referer, job.SourceUrl);
             if (token.IsCancellationRequested)
             {
                 return;
             }
 
-            if (LooksLikeHls(source))
+            var hls = LooksLikeHls(source) ||
+                      string.Equals(formatHint, "hls", StringComparison.OrdinalIgnoreCase);
+            if (hls)
             {
                 DownloadHls(job, source, userAgent, token);
             }
             else
             {
                 DownloadFile(job, source, userAgent, token);
+                if (job.State == DownloadState.Running && LooksLikePlaylistFile(job.OutputPath))
+                {
+                    TryDelete(job.OutputPath);
+                    DownloadHls(job, source, userAgent, token);
+                }
+            }
+
+            if (job.State == DownloadState.Running && LooksLikeStubFile(job.OutputPath))
+            {
+                Fail(job, "Download did not produce a video file");
+                TryDeleteOutputs(job.OutputPath);
+                return;
             }
 
             if (job.State == DownloadState.Running)
@@ -385,7 +413,7 @@ public sealed class DownloadManager : IDisposable
 
     private void DownloadHls(DownloadJob job, string url, string? userAgent, CancellationToken token)
     {
-        var master = GetString(url, userAgent, token);
+        var master = GetString(url, userAgent, job.Referer, token);
         var mediaUrl = url;
         string? audioUrl = null;
         if (HlsPlaylist.IsMaster(master))
@@ -401,10 +429,10 @@ public sealed class DownloadManager : IDisposable
             job.Height = pick.Height;
             audioUrl = HlsPlaylist.AudioUri(master, url, job.AudioLang, pick.Audio)
                        ?? HlsPlaylist.AudioUri(master, url, job.AudioLang);
-
+            CollectHlsTracks(job, master, url, userAgent);
             Raise();
             mediaUrl = pick.Url;
-            master = GetString(mediaUrl, userAgent, token);
+            master = GetString(mediaUrl, userAgent, job.Referer, token);
         }
 
         if (HlsPlaylist.IsLive(master))
@@ -427,11 +455,14 @@ public sealed class DownloadManager : IDisposable
             !string.IsNullOrWhiteSpace(audioUrl) &&
             !(File.Exists(audioPath) && new FileInfo(audioPath).Length > 1024))
         {
-            var audioList = GetString(audioUrl, userAgent, token);
+            var audioList = GetString(audioUrl, userAgent, job.Referer, token);
             WriteMediaPlaylist(job, audioList, audioUrl, audioPath, userAgent, token, updateProgress: false);
         }
 
-        if (FfmpegMux.TryRemux(videoPath, audioPath, dest) ||
+        var extraAudio = DownloadExtraAudio(job, audioUrl, userAgent, token);
+        var labeled = LabeledAudio(job, audioPath, audioUrl, extraAudio);
+        if (FfmpegMux.TryRemux(videoPath, labeled, dest) ||
+            FfmpegMux.TryRemux(videoPath, audioPath, dest, extraAudio.Select(item => item.Path).ToList()) ||
             StreamDump.TryRemux(videoPath, audioPath, dest, token))
         {
             job.OutputPath = dest;
@@ -439,6 +470,11 @@ public sealed class DownloadManager : IDisposable
             if (audioPath is not null)
             {
                 TryDelete(audioPath);
+            }
+
+            foreach (var extra in extraAudio)
+            {
+                TryDelete(extra.Path);
             }
         }
         else if (audioPath is not null)
@@ -481,7 +517,7 @@ public sealed class DownloadManager : IDisposable
         using var output = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read);
         if (map is not null)
         {
-            CopySegment(output, map, userAgent, token);
+            CopySegment(output, map, userAgent, job.Referer, token);
             if (updateProgress)
             {
                 job.SegmentsDone++;
@@ -493,7 +529,7 @@ public sealed class DownloadManager : IDisposable
         {
             token.ThrowIfCancellationRequested();
             ThrowIfPaused(job);
-            var bytes = CopySegment(output, segment.Url, userAgent, token, segment.RangeStart, segment.RangeLength);
+            var bytes = CopySegment(output, segment.Url, userAgent, job.Referer, token, segment.RangeStart, segment.RangeLength);
             if (updateProgress)
             {
                 job.Bytes += bytes;
@@ -506,9 +542,22 @@ public sealed class DownloadManager : IDisposable
     private void DownloadFile(DownloadJob job, string url, string? userAgent, CancellationToken token)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        ApplyHeaders(request, userAgent);
+        ApplyHeaders(request, userAgent, job.Referer);
         using var response = _http.Send(request, HttpCompletionOption.ResponseHeadersRead, token);
-        response.EnsureSuccessStatusCode();
+        if (!response.IsSuccessStatusCode)
+        {
+            var viaCurl = StreamCatalog.CurlBytes(url, job.Referer, userAgent);
+            if (viaCurl is { Length: > 0 })
+            {
+                File.WriteAllBytes(job.OutputPath, viaCurl);
+                job.Bytes = viaCurl.Length;
+                job.TotalBytes = viaCurl.Length;
+                return;
+            }
+
+            response.EnsureSuccessStatusCode();
+        }
+
         job.TotalBytes = response.Content.Headers.ContentLength ?? 0;
         job.Bytes = 0;
         using var input = response.Content.ReadAsStream(token);
@@ -528,45 +577,98 @@ public sealed class DownloadManager : IDisposable
         }
     }
 
-    private string GetString(string url, string? userAgent, CancellationToken token) =>
-        System.Text.Encoding.UTF8.GetString(GetBytes(url, userAgent, token));
+    private string GetString(string url, string? userAgent, string? referer, CancellationToken token) =>
+        System.Text.Encoding.UTF8.GetString(GetBytes(url, userAgent, referer, token));
 
-    private byte[] GetBytes(string url, string? userAgent, CancellationToken token, long? rangeStart = null, int? rangeLength = null)
+    private byte[] GetBytes(string url, string? userAgent, string? referer, CancellationToken token, long? rangeStart = null, int? rangeLength = null)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        ApplyHeaders(request, userAgent);
-        if (rangeStart is { } start && rangeLength is { } length)
+        try
         {
-            request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(start, start + length - 1);
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            ApplyHeaders(request, userAgent, referer);
+            if (rangeStart is { } start && rangeLength is { } length)
+            {
+                request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(start, start + length - 1);
+            }
+
+            using var response = _http.Send(request, token);
+            if (response.IsSuccessStatusCode)
+            {
+                return response.Content.ReadAsByteArrayAsync(token).GetAwaiter().GetResult();
+            }
+
+            if ((int)response.StatusCode is 401 or 403 or 412)
+            {
+                var viaCurl = StreamCatalog.CurlBytes(url, referer, userAgent, rangeStart, rangeLength);
+                if (viaCurl is { Length: > 0 })
+                {
+                    return viaCurl;
+                }
+            }
+
+            response.EnsureSuccessStatusCode();
+        }
+        catch (HttpRequestException)
+        {
+            var viaCurl = StreamCatalog.CurlBytes(url, referer, userAgent, rangeStart, rangeLength);
+            if (viaCurl is { Length: > 0 })
+            {
+                return viaCurl;
+            }
+
+            throw;
         }
 
-        using var response = _http.Send(request, token);
-        response.EnsureSuccessStatusCode();
-        return response.Content.ReadAsByteArrayAsync(token).GetAwaiter().GetResult();
+        throw new InvalidOperationException("Download failed.");
     }
 
-    private static void ApplyHeaders(HttpRequestMessage request, string? userAgent)
+    private static void ApplyHeaders(HttpRequestMessage request, string? userAgent, string? referer)
     {
-        if (!string.IsNullOrWhiteSpace(userAgent))
+        request.Headers.Remove("User-Agent");
+        request.Headers.TryAddWithoutValidation(
+            "User-Agent",
+            string.IsNullOrWhiteSpace(userAgent) ? StreamCatalog.ChromeUa : userAgent);
+        request.Headers.TryAddWithoutValidation("Accept", "*/*");
+        request.Headers.TryAddWithoutValidation("Accept-Language", "en-US,en;q=0.9");
+
+        var url = request.RequestUri?.ToString() ?? "";
+        var page = LooksLikeYouTubeMedia(url)
+            ? "https://www.youtube.com"
+            : StreamCatalog.SiteReferer(url, referer);
+        if (string.IsNullOrWhiteSpace(page))
         {
-            request.Headers.TryAddWithoutValidation("User-Agent", userAgent);
+            return;
         }
 
-        request.Headers.TryAddWithoutValidation("Referer", "https://www.youtube.com");
-        request.Headers.TryAddWithoutValidation("Origin", "https://www.youtube.com");
+        var origin = StreamCatalog.PageOrigin(page) ?? page;
+        request.Headers.Remove("Referer");
+        request.Headers.Remove("Origin");
+        request.Headers.TryAddWithoutValidation("Referer", page);
+        request.Headers.TryAddWithoutValidation("Origin", origin.TrimEnd('/'));
     }
 
     private static void Write(Stream output, byte[] bytes) => output.Write(bytes, 0, bytes.Length);
 
-    private long CopySegment(Stream output, string url, string? userAgent, CancellationToken token,
+    private long CopySegment(Stream output, string url, string? userAgent, string? referer, CancellationToken token,
         long? rangeStart = null, int? rangeLength = null)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        ApplyHeaders(request, userAgent);
+        ApplyHeaders(request, userAgent, referer);
         if (rangeStart is { } start && rangeLength is { } length)
             request.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(start, start + length - 1);
         using var response = _http.Send(request, HttpCompletionOption.ResponseHeadersRead, token);
-        response.EnsureSuccessStatusCode();
+        if (!response.IsSuccessStatusCode)
+        {
+            var viaCurl = StreamCatalog.CurlBytes(url, referer, userAgent, rangeStart, rangeLength);
+            if (viaCurl is { Length: > 0 })
+            {
+                output.Write(viaCurl, 0, viaCurl.Length);
+                return viaCurl.Length;
+            }
+
+            response.EnsureSuccessStatusCode();
+        }
+
         using var input = response.Content.ReadAsStream(token);
         var buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(64 * 1024);
         long total = 0;
@@ -616,10 +718,167 @@ public sealed class DownloadManager : IDisposable
 
     private void Raise() => Changed?.Invoke();
 
-    private static bool LooksLikeHls(string url) =>
-        url.Contains(".m3u8", StringComparison.OrdinalIgnoreCase) ||
-        url.Contains("hls_variant", StringComparison.OrdinalIgnoreCase) ||
-        url.Contains("mpegurl", StringComparison.OrdinalIgnoreCase);
+    internal static bool LooksLikeHls(string url)
+    {
+        if (ProtectedStreamProxy.TryUnwrap(url, out var real))
+        {
+            url = real;
+        }
+
+        return url.Contains(".m3u8", StringComparison.OrdinalIgnoreCase) ||
+               url.Contains("hls_variant", StringComparison.OrdinalIgnoreCase) ||
+               url.Contains("mpegurl", StringComparison.OrdinalIgnoreCase) ||
+               url.Contains("master.txt", StringComparison.OrdinalIgnoreCase) ||
+               url.Contains("playlist.txt", StringComparison.OrdinalIgnoreCase) ||
+               StreamCatalog.LooksPackedHls(url);
+    }
+
+    private static bool LooksLikeYouTubeMedia(string url) =>
+        url.Contains("googlevideo.com", StringComparison.OrdinalIgnoreCase) ||
+        url.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
+        url.Contains("youtu.be", StringComparison.OrdinalIgnoreCase);
+
+    private static void HarvestCaptions(DownloadJob job, string source)
+    {
+        AddSelectedCaption(job);
+        IReadOnlyList<ExternalCaption> found = [];
+        try
+        {
+            if (YouTubeCatalog.IsWatchUrl(source))
+            {
+                found = YouTubeCatalog.ListCaptions(source);
+            }
+            else if (StreamCatalog.TryReadDailymotion(source, out var dailyId))
+            {
+                found = StreamCatalog.DailyCaptions(dailyId);
+            }
+            else if (job.Captions.Count == 0)
+            {
+                found = StreamCatalog.SidecarCaptionsFromPage(source);
+            }
+        }
+        catch (Exception)
+        {
+        }
+
+        foreach (var cap in found)
+        {
+            AddCaption(job, cap);
+        }
+    }
+
+    internal static void AddSelectedCaption(DownloadJob job)
+    {
+        if (string.IsNullOrWhiteSpace(job.CaptionUrl) && string.IsNullOrWhiteSpace(job.SubLang))
+        {
+            return;
+        }
+
+        if (MediaLanguage.IsOff(job.SubLang) && string.IsNullOrWhiteSpace(job.CaptionUrl))
+        {
+            return;
+        }
+
+        var url = job.CaptionUrl;
+        if (string.IsNullOrWhiteSpace(url) && YouTubeCatalog.TryReadVideoId(job.SourceUrl, out var id))
+        {
+            url = YouTubeCatalog.CaptionVttUrl(id, job.SubLang ?? "");
+        }
+
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return;
+        }
+
+        var lang = StreamCaptionLoader.EffectiveLanguage(job.SubLang, url);
+        if (lang.Length == 0)
+        {
+            lang = YouTubeCatalog.CaptionLanguageFromUrl(url) ?? "";
+        }
+
+        var name = lang;
+        if (YouTubeCatalog.CaptionUrlIsTranslate(url))
+        {
+            name = string.IsNullOrWhiteSpace(lang) ? "Translated" : lang;
+        }
+
+        AddCaption(job, new ExternalCaption(lang, url, name));
+    }
+
+    internal static void AddCaption(DownloadJob job, ExternalCaption cap)
+    {
+        if (string.IsNullOrWhiteSpace(cap.Url))
+        {
+            return;
+        }
+
+        var lang = MediaLanguage.ShortCode(cap.Language);
+        if (job.Captions.Any(item =>
+                string.Equals(item.Url, cap.Url, StringComparison.OrdinalIgnoreCase) ||
+                (lang.Length > 0 &&
+                 string.Equals(MediaLanguage.ShortCode(item.Language), lang, StringComparison.OrdinalIgnoreCase) &&
+                 YouTubeCatalog.CaptionUrlIsTranslate(item.Url) == YouTubeCatalog.CaptionUrlIsTranslate(cap.Url))))
+        {
+            return;
+        }
+
+        job.Captions.Add(cap);
+    }
+
+    internal static string PageReferer(string? referer, string? sourceUrl)
+    {
+        if (!string.IsNullOrWhiteSpace(sourceUrl) &&
+            UrlSanitizer.IsUrl(sourceUrl) &&
+            !StreamCatalog.IsDirectMedia(sourceUrl) &&
+            (string.IsNullOrWhiteSpace(referer) || IsBareOrigin(referer)))
+        {
+            return sourceUrl;
+        }
+
+        return string.IsNullOrWhiteSpace(referer)
+            ? StreamCatalog.SiteReferer(sourceUrl, sourceUrl)
+            : referer;
+    }
+
+    private static bool IsBareOrigin(string url)
+    {
+        return Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
+               (uri.AbsolutePath is "/" or "" ) &&
+               string.IsNullOrEmpty(uri.Query);
+    }
+
+    internal static bool LooksLikePlaylistFile(string path)
+    {
+        var head = ReadHeadText(path, 16);
+        return head.StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static bool LooksLikeStubFile(string path)
+    {
+        if (!File.Exists(path) || new FileInfo(path).Length == 0)
+        {
+            return true;
+        }
+
+        var head = ReadHeadText(path, 64);
+        return head.StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase) ||
+               head.StartsWith("<!", StringComparison.OrdinalIgnoreCase) ||
+               head.StartsWith("<html", StringComparison.OrdinalIgnoreCase) ||
+               head.StartsWith("{", StringComparison.Ordinal);
+    }
+
+    private static string ReadHeadText(string path, int count)
+    {
+        if (!File.Exists(path))
+        {
+            return "";
+        }
+
+        using var stream = File.OpenRead(path);
+        var buffer = new byte[count];
+        var read = stream.Read(buffer, 0, buffer.Length);
+        return System.Text.Encoding.UTF8.GetString(buffer, 0, read).TrimStart('\uFEFF', ' ', '\t', '\r', '\n');
+    }
 
     private static string UniquePath(string path)
     {
@@ -643,37 +902,243 @@ public sealed class DownloadManager : IDisposable
         return path;
     }
 
-    private static void AttachCaptions(DownloadJob job)
+    private void CollectHlsTracks(DownloadJob job, string master, string url, string? userAgent)
     {
-        if (MediaLanguage.IsOff(job.SubLang) && string.IsNullOrWhiteSpace(job.CaptionUrl))
+        job.AudioTracks.Clear();
+        job.AudioTracks.AddRange(HlsPlaylist.AudioTracks(master, url));
+        var folder = Path.Combine(Path.GetTempPath(), "GrokPlayer", "captions");
+        Directory.CreateDirectory(folder);
+        foreach (var sub in HlsPlaylist.Subtitles(master, url))
+        {
+            if (sub.Forced)
+            {
+                continue;
+            }
+
+            try
+            {
+                var body = HlsCaptions.ReadDocument(sub.Url, userAgent);
+                if (string.IsNullOrWhiteSpace(body) || !StreamCaptionLoader.LooksLikeSidecar(body))
+                {
+                    continue;
+                }
+
+                var parsed = SrtDocument.Parse(body, compact: false).ForDisplay();
+                if (parsed.Cues.Count == 0)
+                {
+                    continue;
+                }
+
+                var lang = MediaLanguage.ShortCode(
+                    string.IsNullOrWhiteSpace(sub.Language) ? sub.Name : sub.Language);
+                var name = string.IsNullOrWhiteSpace(sub.Name) ? lang : sub.Name.Trim();
+                var tag = string.IsNullOrWhiteSpace(lang) ? "auto" : SafeLangTag(lang);
+                var vtt = Path.Combine(folder, "dl-" + Math.Abs(url.GetHashCode(StringComparison.Ordinal)).ToString("x") + "." + tag + ".vtt");
+                File.WriteAllText(vtt, body);
+                AddCaption(job, new ExternalCaption(lang, vtt, name));
+            }
+            catch (Exception)
+            {
+            }
+        }
+    }
+
+    private List<(string Path, string Language, string Name)> DownloadExtraAudio(
+        DownloadJob job,
+        string? primaryUrl,
+        string? userAgent,
+        CancellationToken token)
+    {
+        var extra = new List<(string Path, string Language, string Name)>();
+        var index = 0;
+        foreach (var track in job.AudioTracks)
+        {
+            if (string.IsNullOrWhiteSpace(track.Url) ||
+                string.Equals(track.Url, primaryUrl, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var tag = SafeLangTag(string.IsNullOrWhiteSpace(track.Language) ? index.ToString() : track.Language);
+            var path = Path.ChangeExtension(job.OutputPath, ".audio-" + tag + ".bin");
+            index++;
+            if (!(File.Exists(path) && new FileInfo(path).Length > 1024))
+            {
+                try
+                {
+                    var list = GetString(track.Url, userAgent, job.Referer, token);
+                    WriteMediaPlaylist(job, list, track.Url, path, userAgent, token, updateProgress: false);
+                }
+                catch (Exception)
+                {
+                    continue;
+                }
+            }
+
+            if (File.Exists(path) && new FileInfo(path).Length > 1024)
+            {
+                extra.Add((path, track.Language, track.Name));
+            }
+        }
+
+        return extra;
+    }
+
+    private static List<(string Path, string Language, string Name)> LabeledAudio(
+        DownloadJob job,
+        string? primaryPath,
+        string? primaryUrl,
+        IReadOnlyList<(string Path, string Language, string Name)> extra)
+    {
+        var list = new List<(string Path, string Language, string Name)>();
+        if (!string.IsNullOrWhiteSpace(primaryPath) && File.Exists(primaryPath))
+        {
+            var primary = job.AudioTracks.FirstOrDefault(item =>
+                string.Equals(item.Url, primaryUrl, StringComparison.OrdinalIgnoreCase));
+            list.Add((primaryPath, primary.Language ?? "", primary.Name ?? ""));
+        }
+
+        list.AddRange(extra);
+        return list;
+    }
+
+    internal static void AttachCaptions(DownloadJob job)
+    {
+        if (MediaLanguage.IsOff(job.SubLang) &&
+            string.IsNullOrWhiteSpace(job.CaptionUrl) &&
+            job.Captions.Count == 0)
         {
             return;
         }
 
         YouTubeCatalog.TryReadVideoId(job.SourceUrl, out var videoId);
-        if (string.IsNullOrWhiteSpace(videoId) && string.IsNullOrWhiteSpace(job.CaptionUrl))
+        AddSelectedCaption(job);
+        if (YouTubeCatalog.IsWatchUrl(job.SourceUrl))
         {
-            return;
+            try
+            {
+                foreach (var cap in YouTubeCatalog.ListCaptions(job.SourceUrl))
+                {
+                    AddCaption(job, cap);
+                }
+            }
+            catch (Exception)
+            {
+            }
         }
 
-        var loaded = StreamCaptionLoader.Load(videoId, job.SubLang, job.CaptionUrl);
-        if (string.IsNullOrWhiteSpace(loaded))
+        var caps = job.Captions.ToList();
+        if (caps.Count == 0 &&
+            (!string.IsNullOrWhiteSpace(videoId) || !string.IsNullOrWhiteSpace(job.CaptionUrl)))
         {
-            return;
+            var loaded = StreamCaptionLoader.Load(videoId, job.SubLang, job.CaptionUrl);
+            if (!string.IsNullOrWhiteSpace(loaded))
+            {
+                caps.Add(new ExternalCaption(job.SubLang ?? "", loaded, job.SubLang ?? "Subtitle"));
+            }
         }
 
-        var document = StreamCaptionLoader.DocumentPath(loaded);
-        var destSrt = Path.ChangeExtension(job.OutputPath, ".srt");
-        var destVtt = Path.ChangeExtension(job.OutputPath, ".vtt");
-        if (document.EndsWith(".vtt", StringComparison.OrdinalIgnoreCase) && File.Exists(document))
+        var tagged = 0;
+        foreach (var cap in caps)
         {
-            File.Copy(document, destVtt, overwrite: true);
+            try
+            {
+                var file = File.Exists(cap.Url)
+                    ? cap.Url
+                    : StreamCaptionLoader.LoadSidecar(cap.Url, cap.Language, cap.Name);
+                if (string.IsNullOrWhiteSpace(file) || !File.Exists(file))
+                {
+                    file = StreamCaptionLoader.Load(videoId, cap.Language, cap.Url);
+                }
+
+                if (string.IsNullOrWhiteSpace(file) || !File.Exists(file))
+                {
+                    continue;
+                }
+
+                var lang = MediaLanguage.ShortCode(cap.Language);
+                if (lang.Length == 0)
+                {
+                    lang = MediaLanguage.ShortCode(MediaLanguage.FromName(cap.Name));
+                }
+
+                if (YouTubeCatalog.CaptionUrlIsTranslate(cap.Url) &&
+                    !string.IsNullOrWhiteSpace(YouTubeCatalog.CaptionLanguageFromUrl(cap.Url)))
+                {
+                    lang = MediaLanguage.ShortCode(YouTubeCatalog.CaptionLanguageFromUrl(cap.Url));
+                }
+
+                var dest = LanguageSidecarPath(job.OutputPath, lang);
+                WriteCaptionSidecar(file, dest);
+                if (File.Exists(dest) && !string.IsNullOrWhiteSpace(SafeLangTag(lang)))
+                {
+                    tagged++;
+                }
+            }
+            catch (Exception)
+            {
+            }
         }
 
-        if (loaded.EndsWith(".srt", StringComparison.OrdinalIgnoreCase) && File.Exists(loaded))
+        if (tagged == 0)
         {
-            File.Copy(loaded, destSrt, overwrite: true);
-            return;
+            var destSrt = Path.ChangeExtension(job.OutputPath, ".srt");
+            foreach (var cap in caps)
+            {
+                try
+                {
+                    var file = File.Exists(cap.Url)
+                        ? cap.Url
+                        : StreamCaptionLoader.LoadSidecar(cap.Url, cap.Language, cap.Name);
+                    if (!string.IsNullOrWhiteSpace(file) && File.Exists(file))
+                    {
+                        WriteCaptionSidecar(file, destSrt);
+                        break;
+                    }
+                }
+                catch (Exception)
+                {
+                }
+            }
+        }
+    }
+
+    internal static string LanguageSidecarPath(string output, string language)
+    {
+        var tag = SafeLangTag(language);
+        var ext = Path.ChangeExtension(output, null);
+        return string.IsNullOrWhiteSpace(tag)
+            ? Path.ChangeExtension(output, ".srt")
+            : ext + "." + tag + ".srt";
+    }
+
+    internal static string SafeLangTag(string? language)
+    {
+        var text = MediaLanguage.ShortCode(language);
+        if (text.Length == 0)
+        {
+            text = (language ?? "").Trim();
+        }
+
+        if (text.Length == 0)
+        {
+            return "";
+        }
+
+        foreach (var ch in Path.GetInvalidFileNameChars())
+        {
+            text = text.Replace(ch, '-');
+        }
+
+        return text.Trim('.', ' ', '-');
+    }
+
+    private static void WriteCaptionSidecar(string source, string dest)
+    {
+        var document = StreamCaptionLoader.DocumentPath(source);
+        if (!File.Exists(document) && File.Exists(source))
+        {
+            document = source;
         }
 
         if (!File.Exists(document))
@@ -681,10 +1146,16 @@ public sealed class DownloadManager : IDisposable
             return;
         }
 
+        if (document.EndsWith(".srt", StringComparison.OrdinalIgnoreCase))
+        {
+            File.Copy(document, dest, overwrite: true);
+            return;
+        }
+
         var parsed = SrtDocument.Parse(File.ReadAllText(document), compact: false).Compacted();
         if (parsed.Cues.Count > 0)
         {
-            parsed.Save(destSrt);
+            parsed.Save(dest);
         }
     }
 

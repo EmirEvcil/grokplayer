@@ -41,6 +41,13 @@ public static class StreamCaptionLoader
 
         if (parsed.Cues.Count == 0)
         {
+            var fallback = StreamCatalog.FetchHtml(url, referer ?? host) ?? "";
+            text = fallback;
+            parsed = LooksLikeSidecar(text) ? SrtDocument.Parse(text, compact: false) : new SrtDocument();
+        }
+
+        if (parsed.Cues.Count == 0)
+        {
             return null;
         }
 
@@ -294,6 +301,34 @@ public static class StreamCaptionLoader
 
         var sibling = SourceSibling(document);
         return sibling is null || !SameOpeningCues(SrtDocument.Parse(text, compact: false), SrtDocument.Load(sibling));
+    }
+
+    public static IEnumerable<string> SiblingCaptionFiles(string? mediaPath)
+    {
+        if (string.IsNullOrWhiteSpace(mediaPath) ||
+            mediaPath.Contains("://", StringComparison.Ordinal) ||
+            !File.Exists(mediaPath))
+        {
+            yield break;
+        }
+
+        var dir = Path.GetDirectoryName(mediaPath);
+        var stem = Path.GetFileNameWithoutExtension(mediaPath);
+        if (string.IsNullOrWhiteSpace(dir) || string.IsNullOrWhiteSpace(stem) || !Directory.Exists(dir))
+        {
+            yield break;
+        }
+
+        foreach (var file in Directory.EnumerateFiles(dir, stem + "*"))
+        {
+            var ext = Path.GetExtension(file);
+            if (ext.Equals(".srt", StringComparison.OrdinalIgnoreCase) ||
+                ext.Equals(".vtt", StringComparison.OrdinalIgnoreCase) ||
+                ext.Equals(".ass", StringComparison.OrdinalIgnoreCase))
+            {
+                yield return file;
+            }
+        }
     }
 
     public static string PlayPath(string? path)

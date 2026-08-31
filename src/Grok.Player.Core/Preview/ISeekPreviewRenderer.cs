@@ -7,9 +7,19 @@ public interface ISeekPreviewRenderer : IDisposable
     void Reset();
 }
 
+public interface INetworkSeekPreviewRenderer
+{
+    void Prepare(string path, string? referer);
+}
+
 public interface IExactSeekPreviewRenderer
 {
     string? CaptureExact(TimeSpan time);
+}
+
+public interface IFastSeekPreviewRenderer
+{
+    string? CaptureFast(TimeSpan time);
 }
 
 public interface ILiveSeekPreviewRenderer

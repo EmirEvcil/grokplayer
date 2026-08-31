@@ -581,6 +581,172 @@ public sealed class PlaybackViewModelTests
     }
 
     [Fact]
+    public void Cycling_youtube_captions_keeps_the_karaoke_play_file()
+    {
+        var vtt = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-yt.vtt");
+        File.WriteAllText(
+            vtt,
+            "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nHello<00:00:00.400><c> world</c>\n");
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        view.ResolveYouTube = _ => new YouTubePlayable(
+            "karaokexxx1",
+            "https://manifest.googlevideo.com/api/manifest/hls_variant/vod.m3u8",
+            "Song",
+            StreamKind.Vod,
+            captionUrl: vtt);
+        view.AddStream(
+            "grokplayer://open?url=" + Uri.EscapeDataString("https://www.youtube.com/watch?v=karaokexxx1") + "&sub=en&caption=" + Uri.EscapeDataString(vtt),
+            play: true);
+        var until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until && view.Subtitles.Applied is null)
+        {
+            Thread.Sleep(20);
+            host.ProcessPendingEvents();
+        }
+
+        Assert.NotNull(view.Subtitles.Applied);
+        Assert.True(view.Subtitles.Applied!.Document.HasKaraoke);
+        var firstPlay = view.Subtitles.Applied.PlayPath;
+        Assert.Contains("\\t(", File.ReadAllText(firstPlay), StringComparison.Ordinal);
+        view.CycleSubtitle();
+        host.ProcessPendingEvents();
+        view.CycleSubtitle();
+        host.ProcessPendingEvents();
+        var lastAdd = fake.Commands.Last(command => command.Length >= 2 && command[0] == "sub-add");
+        Assert.Equal(view.Subtitles.Applied!.PlayPath, lastAdd[1]);
+        Assert.Contains("\\t(", File.ReadAllText(lastAdd[1]), StringComparison.Ordinal);
+        Assert.NotEqual(vtt, lastAdd[1]);
+        File.Delete(vtt);
+    }
+
+    [Fact]
+    public void Mute_does_not_turn_youtube_captions_off()
+    {
+        var vtt = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-yt.vtt");
+        File.WriteAllText(vtt, "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nHello world\n");
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        view.ResolveYouTube = _ => new YouTubePlayable(
+            "mutecapxxx1",
+            "https://manifest.googlevideo.com/api/manifest/hls_variant/vod.m3u8",
+            "Song",
+            StreamKind.Vod,
+            captionUrl: vtt);
+        view.AddStream(
+            "grokplayer://open?url=" + Uri.EscapeDataString("https://www.youtube.com/watch?v=mutecapxxx1") + "&sub=en&caption=" + Uri.EscapeDataString(vtt),
+            play: true);
+        var until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until && view.Subtitles.Applied is null)
+        {
+            Thread.Sleep(20);
+            host.ProcessPendingEvents();
+        }
+
+        Assert.NotNull(view.Subtitles.Applied);
+        host.Pause();
+        host.ProcessPendingEvents();
+        view.ToggleMute();
+        host.ProcessPendingEvents();
+        Assert.NotNull(view.Subtitles.Applied);
+        Assert.NotEqual("Subs Off", view.SubtitleTrackLabel);
+        var lastSid = fake.Lifecycle.FindLastIndex(item => item == "property:sid=no");
+        var lastAdd = fake.Lifecycle.FindLastIndex(item => item.StartsWith("command:sub-add", StringComparison.Ordinal));
+        Assert.True(lastAdd > lastSid, "mute must not leave captions detached");
+        File.Delete(vtt);
+    }
+
+    [Fact]
+    public void Switching_youtube_playlist_items_keeps_captions()
+    {
+        var first = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-a.vtt");
+        var second = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-b.vtt");
+        File.WriteAllText(first, "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nFirst video\n");
+        File.WriteAllText(second, "WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nSecond video\n");
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        view.ResolveYouTube = path =>
+            path.Contains("aaaaaaaaaaa", StringComparison.Ordinal)
+                ? new YouTubePlayable(
+                    "aaaaaaaaaaa",
+                    "https://manifest.googlevideo.com/api/manifest/hls_variant/one.m3u8",
+                    "One",
+                    StreamKind.Vod,
+                    captionUrl: first)
+                : new YouTubePlayable(
+                    "bbbbbbbbbbb",
+                    "https://manifest.googlevideo.com/api/manifest/hls_variant/two.m3u8",
+                    "Two",
+                    StreamKind.Vod,
+                    captionUrl: second);
+        Assert.True(view.AddStream(
+            "grokplayer://open?url=" + Uri.EscapeDataString("https://www.youtube.com/watch?v=aaaaaaaaaaa") + "&sub=en&caption=" + Uri.EscapeDataString(first),
+            play: true));
+        host.ProcessPendingEvents();
+        Assert.True(view.AddStream(
+            "grokplayer://open?url=" + Uri.EscapeDataString("https://www.youtube.com/watch?v=bbbbbbbbbbb") + "&sub=en&caption=" + Uri.EscapeDataString(second),
+            play: true));
+        host.ProcessPendingEvents();
+        view.PlayFrom(view.Streams, 0);
+        var until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until)
+        {
+            host.ProcessPendingEvents();
+            if (view.Subtitles.Applied?.Document.Cues.FirstOrDefault()?.Text.Contains("First", StringComparison.Ordinal) == true)
+            {
+                break;
+            }
+
+            Thread.Sleep(20);
+        }
+
+        Assert.Contains("First", view.Subtitles.Applied?.Document.Cues[0].Text ?? "", StringComparison.Ordinal);
+        File.Delete(first);
+        File.Delete(second);
+    }
+
+    [Fact]
+    public void Browser_edit_of_a_sidecar_vtt_reapplies_the_play_file()
+    {
+        var turkish = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-tr.vtt");
+        File.WriteAllText(turkish, "WEBVTT\n\n00:00:00.000 --> 00:00:05.000\nWalt, beynin Wisconsin kadar büyük...\n");
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        Assert.True(view.AddStream(
+            ExternalOpen.ToProtocol(
+                "https://cdn.example/somebody.m3u8",
+                "Somebody",
+                StreamKind.Vod,
+                captions: [new ExternalCaption("tr", turkish, "Turkish")]),
+            play: true));
+        var until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until && view.Subtitles.Applied is null)
+        {
+            host.ProcessPendingEvents();
+            Thread.Sleep(20);
+        }
+
+        Assert.NotNull(view.Subtitles.Applied);
+        view.Subtitles.Active!.Document.Cues[0].Text = "Edited Wisconsin";
+        view.Subtitles.Active.Document.Cues[0].Spans = [new CaptionSpan("Edited Wisconsin", null)];
+        view.Subtitles.PersistActive();
+        host.ProcessPendingEvents();
+        var lastAdd = fake.Commands.Last(command => command.Length >= 2 && command[0] == "sub-add");
+        Assert.Equal(view.Subtitles.Applied!.PlayPath, lastAdd[1]);
+        Assert.Contains("Edited Wisconsin", File.ReadAllText(lastAdd[1]), StringComparison.Ordinal);
+        File.Delete(turkish);
+        var edited = turkish + ".edited.srt";
+        if (File.Exists(edited))
+        {
+            File.Delete(edited);
+        }
+    }
+
+    [Fact]
     public void Youtube_asr_and_official_turkish_are_separate_cycle_choices()
     {
         var official = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-tr.vtt");
@@ -724,6 +890,54 @@ public sealed class PlaybackViewModelTests
             Assert.DoesNotContain(labels, item => item.Contains("tr:asr", StringComparison.Ordinal));
             Assert.Contains("Subs English", labels);
             Assert.Contains("Subs Türkçe", labels);
+        }
+        finally
+        {
+            File.Delete(english);
+            File.Delete(turkish);
+        }
+    }
+
+    [Fact]
+    public void Sidecars_select_turkish_instead_of_staying_off()
+    {
+        var english = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-en.vtt");
+        var turkish = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-tr.vtt");
+        File.WriteAllText(english, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello\n");
+        File.WriteAllText(turkish, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nMerhaba\n");
+        try
+        {
+            var fake = new FakeMpvNative();
+            using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+            using var view = new PlaybackViewModel(
+                host,
+                streamSubtitles: new StreamSubtitleSettings { Mode = StreamSubtitleMode.On, LastSub = "de" });
+            Assert.True(view.AddStream(
+                ExternalOpen.ToProtocol(
+                    "https://cdn.example/somebody.m3u8",
+                    "Somebody",
+                    StreamKind.Vod,
+                    subLang: "de",
+                    captions:
+                    [
+                        new ExternalCaption("en", english, "English"),
+                        new ExternalCaption("tr", turkish, "Turkish")
+                    ]),
+                play: true));
+            var until = DateTime.UtcNow.AddSeconds(3);
+            while (DateTime.UtcNow < until)
+            {
+                host.ProcessPendingEvents();
+                if (view.SubtitleTrackLabel.Contains("Türkçe", StringComparison.Ordinal))
+                {
+                    break;
+                }
+
+                Thread.Sleep(20);
+            }
+
+            Assert.Equal("Subs Türkçe", view.SubtitleTrackLabel);
+            Assert.DoesNotContain("de", view.SubtitleTrackLabel, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {
@@ -1470,8 +1684,13 @@ public sealed class PlaybackViewModelTests
         Assert.Equal("Audio German", session.View.AudioTrackLabel);
         Assert.Equal("Subs Off", session.View.SubtitleTrackLabel);
 
-        session.View.CycleAudio();
+        session.View.SelectPlayingAudio(1);
         Assert.Equal("Audio Turkish", session.View.AudioTrackLabel);
+        Assert.Contains(session.View.PlayingAudioChoices(), item => item.Selected && item.Label.Contains("Turkish", StringComparison.OrdinalIgnoreCase));
+        session.View.SelectPlayingSubtitle(0);
+        Assert.Equal("Subs English", session.View.SubtitleTrackLabel);
+        session.View.SelectPlayingSubtitle(-1);
+        Assert.Equal("Subs Off", session.View.SubtitleTrackLabel);
         session.View.CycleAudio();
         Assert.Equal("Audio German", session.View.AudioTrackLabel);
 
@@ -1792,6 +2011,116 @@ public sealed class PlaybackViewModelTests
         Assert.Equal("en", view.PreferredSubLang);
         Assert.Equal("Hello", view.Subtitles.Applied?.Document.Cues[0].Text);
         File.Delete(caption);
+    }
+
+    [Fact]
+    public void Local_open_renders_the_sidecar_the_button_names()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "grok-local-subs-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var video = Path.Combine(dir, "clip.mp4");
+        File.WriteAllBytes(video, [1, 2, 3, 4]);
+        File.WriteAllText(
+            Path.Combine(dir, "clip.af.srt"),
+            "1\n00:00:00,000 --> 00:00:01,000\nOndersteuning voor die aanvang\n");
+        File.WriteAllText(
+            Path.Combine(dir, "clip.tr-asr.srt"),
+            "1\n00:00:00,000 --> 00:00:01,000\nNumaraya baslamadan once\n");
+        try
+        {
+            var fake = new FakeMpvNative();
+            using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+            using var view = new PlaybackViewModel(
+                host,
+                streamSubtitles: new StreamSubtitleSettings { Mode = StreamSubtitleMode.On, LastSub = "af" });
+            view.Open(video);
+            host.ProcessPendingEvents();
+
+            Assert.Contains("Afrikaans", view.SubtitleTrackLabel, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Ondersteuning", view.Subtitles.Applied?.Document.Cues[0].Text ?? "", StringComparison.Ordinal);
+            var added = fake.Commands.Last(command => command.Length >= 2 && command[0] == "sub-add");
+            Assert.Contains(".af.", added[1], StringComparison.OrdinalIgnoreCase);
+
+            view.CycleSubtitle();
+            Assert.Contains("Türkçe", view.SubtitleTrackLabel, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Numaraya", view.Subtitles.Applied?.Document.Cues[0].Text ?? "", StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void Pause_keeps_the_cycled_local_sidecar()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "grok-local-pause-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var video = Path.Combine(dir, "clip.mp4");
+        File.WriteAllBytes(video, [1, 2, 3, 4]);
+        File.WriteAllText(
+            Path.Combine(dir, "clip.af.srt"),
+            "1\n00:00:00,000 --> 00:00:01,000\nOndersteuning voor die aanvang\n");
+        File.WriteAllText(
+            Path.Combine(dir, "clip.tr-asr.srt"),
+            "1\n00:00:00,000 --> 00:00:01,000\nNumaraya baslamadan once\n");
+        try
+        {
+            var fake = new FakeMpvNative();
+            using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+            using var view = new PlaybackViewModel(
+                host,
+                streamSubtitles: new StreamSubtitleSettings { Mode = StreamSubtitleMode.On, LastSub = "tr:asr" });
+            view.Open(video);
+            host.ProcessPendingEvents();
+            Assert.Contains("Türkçe", view.SubtitleTrackLabel, StringComparison.OrdinalIgnoreCase);
+
+            view.CycleSubtitle();
+            host.ProcessPendingEvents();
+            Assert.Contains("Off", view.SubtitleTrackLabel, StringComparison.OrdinalIgnoreCase);
+
+            view.CycleSubtitle();
+            host.ProcessPendingEvents();
+            Assert.Contains("Afrikaans", view.SubtitleTrackLabel, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Ondersteuning", view.Subtitles.Applied?.Document.Cues[0].Text ?? "", StringComparison.Ordinal);
+            var afterPick = fake.Lifecycle.Count;
+
+            view.TogglePlayPause();
+            host.ProcessPendingEvents();
+            view.TogglePlayPause();
+            host.ProcessPendingEvents();
+
+            Assert.Contains("Afrikaans", view.SubtitleTrackLabel, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("Ondersteuning", view.Subtitles.Applied?.Document.Cues[0].Text ?? "", StringComparison.Ordinal);
+            Assert.DoesNotContain(fake.Lifecycle.Skip(afterPick), item => item == "property:sid=no");
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void Youtube_storyboard_does_not_attach_to_hdfilm()
+    {
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        view.ResolveYouTube = _ => new YouTubePlayable(
+            "dQw4w9wgBcQ",
+            "https://manifest.googlevideo.com/api/manifest/hls_variant/vod.m3u8",
+            "Song",
+            StreamKind.Vod,
+            storyboardSpec: "https://i.ytimg.com/sb/dQw4w9wgBcQ/storyboard3_L$L/$N.jpg|48#27#100#10#10#0#default#rs$0");
+        view.AddStream("https://www.youtube.com/watch?v=dQw4w9wgBcQ", play: true);
+        host.ProcessPendingEvents();
+        Assert.False(string.IsNullOrWhiteSpace(view.StoryboardSpec));
+
+        view.AddStream(
+            "https://www.hdfilmcehennemi.now/bolum/breaking-bad-1-sezon-1-bolum-1-izle-16/",
+            play: true);
+        host.ProcessPendingEvents();
+        Assert.True(string.IsNullOrWhiteSpace(view.StoryboardSpec));
     }
 
     [Fact]

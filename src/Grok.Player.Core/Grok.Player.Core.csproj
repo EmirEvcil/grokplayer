@@ -17,6 +17,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Grok.Player.Core.Tests" />
     <InternalsVisibleTo Include="Grok.Player.Core.IntegrationTests" />
+    <InternalsVisibleTo Include="YoutubeProbe" />
   </ItemGroup>
 
 </Project>

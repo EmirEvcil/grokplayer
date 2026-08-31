@@ -92,7 +92,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         _player.StateChanged += OnPlayerChanged;
         _player.TimeChanged += OnTimeChanged;
         _player.DurationChanged += OnPlayerChanged;
-        _player.VolumeChanged += OnPlayerChanged;
+        _player.VolumeChanged += OnVolumeChanged;
         _player.Error += OnError;
         _player.MediaOpened += OnPlayerChanged;
         _player.MediaEnded += OnMediaEnded;
@@ -210,6 +210,10 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
 
     public MediaPlaylist VisiblePlaylist => _streamTab ? _streams : _playlist;
 
+    public string? PlayingReferer => CurrentItem()?.Referer;
+
+    public readonly record struct TrackMenuItem(string Label, bool Selected, int Index);
+
     public bool StreamTab => _streamTab;
 
     public bool IsLoading =>
@@ -234,8 +238,15 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
                 return null;
             }
 
+            string? id = null;
             if (item is not null &&
-                YouTubeCatalog.TryReadVideoId(item.Path, out var id) &&
+                !YouTubeCatalog.TryReadVideoId(item.Path, out id) &&
+                !YouTubeCatalog.TryReadVideoId(item.MediaUrl, out id))
+            {
+                return null;
+            }
+
+            if (!string.IsNullOrWhiteSpace(id) &&
                 !string.Equals(_youtube.VideoId, id, StringComparison.Ordinal))
             {
                 return null;
@@ -1126,6 +1137,8 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
     public void ToggleMute()
     {
         _player.ToggleMute();
+        _captionAppliedSerial = 0;
+        ApplySubtitleTrack();
         RefreshFromPlayer();
     }
 
@@ -1161,8 +1174,24 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
                 return "Audio";
             }
 
-            var track = _player.ListTracks("audio").FirstOrDefault(item => item.Selected);
+            var tracks = _player.ListTracks("audio");
+            var track = tracks.FirstOrDefault(item => item.Selected);
             var name = TrackDisplay(track);
+            if (string.IsNullOrWhiteSpace(name) && track is not null)
+            {
+                var index = -1;
+                for (var i = 0; i < tracks.Count; i++)
+                {
+                    if (tracks[i].Id == track.Id)
+                    {
+                        index = i;
+                        break;
+                    }
+                }
+
+                name = (index + 1).ToString();
+            }
+
             return string.IsNullOrWhiteSpace(name) ? "Audio" : "Audio " + name;
         }
     }
@@ -1256,6 +1285,73 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         Note(SubtitleTrackLabel);
     }
 
+    public IReadOnlyList<TrackMenuItem> PlayingAudioChoices()
+    {
+        if (!HasMedia)
+        {
+            return [];
+        }
+
+        var tracks = _player.ListTracks("audio");
+        var list = new List<TrackMenuItem>(tracks.Count);
+        for (var i = 0; i < tracks.Count; i++)
+        {
+            var name = TrackDisplay(tracks[i]);
+            list.Add(new TrackMenuItem(
+                string.IsNullOrWhiteSpace(name) ? "Track " + (i + 1) : name,
+                tracks[i].Selected,
+                i));
+        }
+
+        return list;
+    }
+
+    public void SelectPlayingAudio(int index)
+    {
+        var tracks = _player.ListTracks("audio");
+        if (index < 0 || index >= tracks.Count)
+        {
+            Note("No audio tracks");
+            return;
+        }
+
+        _player.SetTrack("audio", tracks[index].Id);
+        RefreshTrackLabels();
+        Note(AudioTrackLabel);
+    }
+
+    public IReadOnlyList<TrackMenuItem> PlayingSubtitleChoices()
+    {
+        var choices = HasMedia ? BuildSubChoices() : [];
+        var list = new List<TrackMenuItem>(choices.Count + 1)
+        {
+            new("Off", !HasMedia || _subCycle < 0, -1)
+        };
+        for (var i = 0; i < choices.Count; i++)
+        {
+            list.Add(new TrackMenuItem(choices[i].Name, _subCycle == i, i));
+        }
+
+        return list;
+    }
+
+    public void SelectPlayingSubtitle(int index)
+    {
+        if (!HasMedia)
+        {
+            Note("No subtitles");
+            return;
+        }
+
+        var choices = BuildSubChoices();
+        _subPicked = true;
+        _subCycle = index < 0 || index >= choices.Count ? -1 : index;
+        ApplySubChoice(_subCycle < 0 ? null : choices[_subCycle]);
+        RefreshTrackLabels();
+        OnPropertyChanged(nameof(OnScreenCaption));
+        Note(SubtitleTrackLabel);
+    }
+
     private sealed record SubChoice(string Name, string Language, string? File, long? TrackId);
 
     private IReadOnlyList<SubChoice> BuildSubChoices()
@@ -1333,7 +1429,13 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         else
         {
             var label = (name ?? "").Trim();
-            core = IsWeakSubName(label) ? (language.Length == 0 ? "" : MediaLanguage.Normalize(language)) : label;
+            var code = language.Length == 0 ? MediaLanguage.Normalize(label) : MediaLanguage.Normalize(language);
+            var named = MediaLanguage.DisplayName(code);
+            core = !string.IsNullOrWhiteSpace(named)
+                ? named
+                : IsWeakSubName(label)
+                    ? code
+                    : label;
         }
 
         if (string.Equals(kind, "asr", StringComparison.OrdinalIgnoreCase))
@@ -1368,7 +1470,8 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
                text.Equals("original", StringComparison.OrdinalIgnoreCase) ||
                text.Equals("orig", StringComparison.OrdinalIgnoreCase) ||
                text.Equals("default", StringComparison.OrdinalIgnoreCase) ||
-               text.Equals("unknown", StringComparison.OrdinalIgnoreCase);
+               text.Equals("unknown", StringComparison.OrdinalIgnoreCase) ||
+               StreamCatalog.LooksLikeErrorTitle(text);
     }
 
     private static bool IsForcedSub(string? name)
@@ -1393,6 +1496,50 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
     {
         var choices = BuildSubChoices();
         ApplySubChoice(_subCycle < 0 || _subCycle >= choices.Count ? null : choices[_subCycle]);
+    }
+
+    private int DefaultSidecarIndex()
+    {
+        var choices = BuildSubChoices();
+        if (choices.Count == 0)
+        {
+            return -1;
+        }
+
+        if (!string.IsNullOrWhiteSpace(_subLang))
+        {
+            for (var i = 0; i < choices.Count; i++)
+            {
+                if (SameSubChoice(choices[i].Language, _subLang) ||
+                    MediaLanguage.MatchesName(_subLang, choices[i].Name))
+                {
+                    return i;
+                }
+            }
+        }
+
+        for (var i = 0; i < choices.Count; i++)
+        {
+            if (MediaLanguage.Matches(choices[i].Language, "tr") ||
+                MediaLanguage.MatchesName("tr", choices[i].Name))
+            {
+                return i;
+            }
+        }
+
+        return 0;
+    }
+
+    private static bool SidecarListHasLang(IReadOnlyList<ExternalCaption>? captions, string? language)
+    {
+        if (captions is null || captions.Count == 0 || string.IsNullOrWhiteSpace(language))
+        {
+            return false;
+        }
+
+        return captions.Any(cap =>
+            MediaLanguage.Matches(cap.Language, language) ||
+            MediaLanguage.MatchesName(language, cap.Name));
     }
 
     private bool _applyingSub;
@@ -1427,31 +1574,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
                 }
             }
 
-            foreach (var play in SubPlayPaths(choice.File))
-            {
-                if (_player.SetSubtitleFile(play))
-                {
-                    _cueOverlay = false;
-                    _player.ClearSubtitleFilter();
-                    _player.SetAssOverlay(null);
-                    OnPropertyChanged(nameof(OnScreenCaption));
-                    return;
-                }
-            }
-
-            foreach (var play in SubPlayPaths(choice.File))
-            {
-                if (_player.SetSubtitleFilter(play))
-                {
-                    _cueOverlay = false;
-                    _player.SetAssOverlay(null);
-                    OnPropertyChanged(nameof(OnScreenCaption));
-                    return;
-                }
-            }
-
-            _cueOverlay = true;
-            PushCueOverlay();
+            AttachSidecarFiles(Subtitles.Applied?.PlayPath, choice.File);
             OnPropertyChanged(nameof(OnScreenCaption));
             return;
         }
@@ -1463,6 +1586,48 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         {
             _player.SetTrack("sub", id);
         }
+    }
+
+    private void AttachSidecarFiles(params string?[] files)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var paths = new List<string>();
+        foreach (var file in files)
+        {
+            foreach (var play in SubPlayPaths(file ?? ""))
+            {
+                if (seen.Add(play))
+                {
+                    paths.Add(play);
+                }
+            }
+        }
+
+        foreach (var play in paths)
+        {
+            if (_player.SetSubtitleFile(play))
+            {
+                _cueOverlay = false;
+                _player.ClearSubtitleFilter();
+                _player.SetAssOverlay(null);
+                _captionFile = play;
+                return;
+            }
+        }
+
+        foreach (var play in paths)
+        {
+            if (_player.SetSubtitleFilter(play))
+            {
+                _cueOverlay = false;
+                _player.SetAssOverlay(null);
+                _captionFile = play;
+                return;
+            }
+        }
+
+        _cueOverlay = true;
+        PushCueOverlay();
     }
 
     private static IEnumerable<string> SubPlayPaths(string file)
@@ -1496,7 +1661,13 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             return track.Title;
         }
 
-        return string.IsNullOrWhiteSpace(track.Language) ? null : track.Language;
+        if (string.IsNullOrWhiteSpace(track.Language))
+        {
+            return null;
+        }
+
+        var named = SubDisplayName(track.Language, MediaLanguage.Normalize(track.Language, keepKind: true));
+        return string.IsNullOrWhiteSpace(named) ? track.Language : named;
     }
 
     private void RefreshTrackLabels()
@@ -1598,7 +1769,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         _player.StateChanged -= OnPlayerChanged;
         _player.TimeChanged -= OnTimeChanged;
         _player.DurationChanged -= OnPlayerChanged;
-        _player.VolumeChanged -= OnPlayerChanged;
+        _player.VolumeChanged -= OnVolumeChanged;
         _player.Error -= OnError;
         _player.MediaOpened -= OnPlayerChanged;
         _player.MediaEnded -= OnMediaEnded;
@@ -1739,11 +1910,8 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
                     return;
                 }
 
-                if (_player.SetSubtitleFile(track.PlayPath))
-                {
-                    _captionFile = track.PlayPath;
-                    _captionAppliedSerial = serial;
-                }
+                AttachSidecarFiles(track.PlayPath, track.SourcePath);
+                _captionAppliedSerial = serial;
             }
             else
             {
@@ -1755,7 +1923,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
 
-        if (_sidecars.Count > 0)
+        if (_sidecars.Count > 0 || !string.IsNullOrWhiteSpace(_captionFile))
         {
             return;
         }
@@ -1821,6 +1989,11 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
 
     private void OnSubtitlesChanged(SubtitleNotify notify)
     {
+        if (_applyingSub)
+        {
+            return;
+        }
+
         if (notify is SubtitleNotify.Track)
         {
             ApplySubtitleTrack();
@@ -1923,6 +2096,8 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         _player.HintDuration(TimeSpan.FromSeconds(_hintDuration.Value));
     }
 
+    private void OnVolumeChanged(object? sender, EventArgs e) => RefreshFromPlayer();
+
     private void OnPlayerChanged(object? sender, EventArgs e)
     {
         if (_player.State is PlayerState.Playing or PlayerState.Paused)
@@ -1981,11 +2156,39 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
 
-        Subtitles.DiscoverSidecar(path);
-        if (_player.State != PlayerState.Opening)
+        var media = MediaPlaylist.Normalize(path);
+        if (_sidecars.Count > 0 &&
+            _player.State is PlayerState.Playing or PlayerState.Paused &&
+            string.Equals(media, Subtitles.CurrentMedia, StringComparison.OrdinalIgnoreCase))
         {
-            Subtitles.BindForMedia(path);
+            return;
         }
+
+        Subtitles.DiscoverSidecar(path);
+        AttachSiblingSidecars(path);
+        if (_player.State == PlayerState.Opening)
+        {
+            return;
+        }
+
+        Subtitles.BindForMedia(path);
+        ApplyDefaultLocalSidecar();
+    }
+
+    private void ApplyDefaultLocalSidecar()
+    {
+        if (_subPicked || _sidecars.Count == 0)
+        {
+            return;
+        }
+
+        _subCycle = DefaultSidecarIndex();
+        if (_subCycle >= 0)
+        {
+            ApplyCycledSubtitle();
+        }
+
+        RefreshTrackLabels();
     }
 
     private void RefreshFromPlayer()
@@ -2067,16 +2270,15 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             _audioLang = MediaLanguage.Normalize(item.AudioLang);
         }
 
+        _skipStreamCaptions = item.SkipCaptions;
         if (item.SkipCaptions)
         {
-            _skipStreamCaptions = true;
             _subLang = null;
             return;
         }
 
         if (!string.IsNullOrWhiteSpace(item.SubLang) || !string.IsNullOrWhiteSpace(item.CaptionUrl))
         {
-            _skipStreamCaptions = false;
             if (!string.IsNullOrWhiteSpace(item.SubLang))
             {
                 _subLang = MediaLanguage.Normalize(item.SubLang, keepKind: true);
@@ -2100,6 +2302,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         _resumeApplied = null;
         _resumeFingerprint = null;
         _contentKey = null;
+        _skipStreamCaptions = false;
         ResetSubtitlePlaybackForMediaSwitch();
         if (resetRetries)
         {
@@ -2332,6 +2535,16 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
                     }
                 }
 
+                if (item is not null &&
+                    item.CaptionTracks.Count == 0 &&
+                    StreamCatalog.TryReadPlayturka(path, out var playturkaId))
+                {
+                    foreach (var cap in StreamCatalog.PlayturkaCaptions(playturkaId))
+                    {
+                        item.CaptionTracks.Add(cap);
+                    }
+                }
+
                 if (playable is not null && loadCaptions && playable.Kind != StreamKind.Live)
                 {
                     var attached = item?.CaptionUrl ?? playable.CaptionUrl;
@@ -2361,9 +2574,62 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
 
     private static bool ShouldAttachSidecars(PlaylistItem item, string path) =>
         item.CaptionTracks.Count > 0 ||
+        !string.IsNullOrWhiteSpace(item.CaptionUrl) ||
         StreamCatalog.TryReadDailymotion(path, out string _) ||
+        StreamCatalog.TryReadPlayturka(path, out string _) ||
         (!YouTubeCatalog.IsWatchUrl(path) &&
          (StreamCatalog.LooksLikeHtmlPage(path) || StreamCatalog.LooksLikeHtmlPage(item.Referer)));
+
+    private void AttachSiblingSidecars(string path)
+    {
+        var files = StreamCaptionLoader.SiblingCaptionFiles(path).ToList();
+        var stem = Path.GetFileNameWithoutExtension(path);
+        var tagged = files.Where(file =>
+        {
+            var name = Path.GetFileNameWithoutExtension(file);
+            return name.StartsWith(stem, StringComparison.OrdinalIgnoreCase) && name.Length > stem.Length;
+        }).ToList();
+        foreach (var file in tagged.Count > 0 ? tagged : files)
+        {
+            var name = Path.GetFileNameWithoutExtension(file);
+            if (name.StartsWith(stem, StringComparison.OrdinalIgnoreCase) && name.Length > stem.Length)
+            {
+                name = name[(stem.Length)..].Trim('.', '-', '_');
+            }
+            else if (string.Equals(name, stem, StringComparison.OrdinalIgnoreCase))
+            {
+                name = "";
+            }
+
+            var lang = SidecarLanguage(name);
+            if (lang.Length == 0)
+            {
+                lang = MediaLanguage.FromName(name);
+            }
+
+            if (IsGenericSubStub(name) || StreamCatalog.LooksLikeErrorTitle(name))
+            {
+                continue;
+            }
+
+            Subtitles.AddFile(file, apply: false, attachTo: path);
+            RememberStreamCaptionFile(file, lang, string.IsNullOrWhiteSpace(name) ? lang : name);
+        }
+    }
+
+    internal static string SidecarLanguage(string? name)
+    {
+        var text = (name ?? "").Trim();
+        if (text.EndsWith("-asr", StringComparison.OrdinalIgnoreCase) ||
+            text.EndsWith(".asr", StringComparison.OrdinalIgnoreCase))
+        {
+            var core = text[..^4];
+            var lang = MediaLanguage.Normalize(core, keepKind: true);
+            return lang.Length == 0 ? "" : lang + ":asr";
+        }
+
+        return MediaLanguage.Normalize(text, keepKind: true);
+    }
 
     private void QueueAttachCaptions(PlaylistItem item)
     {
@@ -2389,6 +2655,19 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
                 try
                 {
                     caps = StreamCatalog.DailyCaptions(dailyId).ToList();
+                }
+                catch (Exception)
+                {
+                }
+            }
+
+            if (caps.Count == 0 &&
+                (StreamCatalog.TryReadPlayturka(item.Path, out var playturkaId) ||
+                 StreamCatalog.TryReadPlayturka(page, out playturkaId)))
+            {
+                try
+                {
+                    caps = StreamCatalog.PlayturkaCaptions(playturkaId).ToList();
                 }
                 catch (Exception)
                 {
@@ -2477,6 +2756,14 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
                 else if (_subPicked)
                 {
                     ApplyCycledSubtitle();
+                }
+                else
+                {
+                    _subCycle = DefaultSidecarIndex();
+                    if (_subCycle >= 0)
+                    {
+                        ApplyCycledSubtitle();
+                    }
                 }
 
                 RefreshTrackLabels();
@@ -2572,7 +2859,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         }
 
         if (!LooksYouTubePlayable(path, playable) &&
-            string.IsNullOrWhiteSpace(item?.SubLang))
+            !SidecarListHasLang(item?.CaptionTracks, _subLang))
         {
             _subLang = null;
         }
@@ -2654,7 +2941,8 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             playable.Referer ?? item?.Referer,
             playable.FormatHint,
             playable.HttpHeaders);
-        if (!string.IsNullOrWhiteSpace(_audioLang) || !string.IsNullOrWhiteSpace(_subLang))
+        if (LooksYouTubePlayable(path, playable) &&
+            (!string.IsNullOrWhiteSpace(_audioLang) || !string.IsNullOrWhiteSpace(_subLang)))
         {
             Note("Audio " + (_audioLang ?? "auto") + " · Subtitles " + (_subLang ?? "off"));
         }
@@ -2866,7 +3154,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
 
         var label = SubDisplayName(name, lang);
         _sidecars.Add((file, string.IsNullOrWhiteSpace(label) ? "Subtitle" : label, lang));
-        if (!_subPicked && lang.Length > 0)
+        if (!_subPicked && _subCycle < 0 && lang.Length > 0)
         {
             var choices = BuildSubChoices();
             for (var i = 0; i < choices.Count; i++)
@@ -2932,11 +3220,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         var play = Subtitles.Applied is { } applied && TrackFitsCurrent(applied)
             ? applied.PlayPath
             : StreamCaptionLoader.PlayPath(_captionFile);
-        if (!_player.SetSubtitleFile(play))
-        {
-            return;
-        }
-
+        AttachSidecarFiles(play, _captionFile);
         _captionAppliedSerial = Volatile.Read(ref _openSerial);
     }
 

@@ -323,8 +323,16 @@ public sealed partial class MainWindow : Window
 
         BindPreviewAtlas();
         _previewUi?.SetMedia(path, _player.Duration);
-        _previewWork?.SetMedia(path, _player.Duration, prefetch: !_view.IsLive && _previewAtlas is null);
+        _previewWork?.SetMedia(
+            path,
+            _player.Duration,
+            prefetch: !_view.IsLive && _previewAtlas is null,
+            referer: _view.PlayingReferer);
         _previewWork?.SetAtlas(_previewAtlas);
+        if (!string.IsNullOrWhiteSpace(path) && !_view.IsLive)
+        {
+            _previewWork?.Warm(path);
+        }
 
         ApplyView();
         ApplyVideoLayout();
@@ -433,20 +441,85 @@ public sealed partial class MainWindow : Window
         ShowActionFeedback(_view.LoopLabel);
     }
 
-    private void AudioTrackButton_Click(object sender, RoutedEventArgs e)
+    private void RebuildAudioMenu()
     {
-        _view.CycleAudio();
-        SetText(AudioTrackText, _view.AudioTrackLabel);
-        AudioTrackButton.SetValue(ToolTipService.ToolTipProperty, _view.AudioTrackLabel);
-        ShowActionFeedback(_view.AudioTrackLabel);
+        if (AudioMenu is null)
+        {
+            return;
+        }
+
+        AudioMenu.Items.Clear();
+        var choices = _view.PlayingAudioChoices();
+        if (choices.Count == 0)
+        {
+            AudioMenu.Items.Add(new MenuFlyoutItem { Text = "No audio tracks", IsEnabled = false });
+            return;
+        }
+
+        foreach (var choice in choices)
+        {
+            var item = new RadioMenuFlyoutItem
+            {
+                Text = choice.Label,
+                GroupName = "GrokPlayingAudio",
+                IsChecked = choice.Selected,
+                Tag = choice.Index
+            };
+            item.Click += PlayingAudio_Click;
+            AudioMenu.Items.Add(item);
+        }
     }
 
-    private void SubtitleTrackButton_Click(object sender, RoutedEventArgs e)
+    private void RebuildPlayingSubtitleMenu()
     {
-        _view.CycleSubtitle();
-        SetText(SubtitleTrackText, _view.SubtitleTrackLabel);
-        SubtitleTrackButton.SetValue(ToolTipService.ToolTipProperty, _view.SubtitleTrackLabel);
-        ShowActionFeedback(_view.SubtitleTrackLabel);
+        if (SubtitlesMenu is null || PlayingSubsSeparator is null)
+        {
+            return;
+        }
+
+        var end = SubtitlesMenu.Items.IndexOf(PlayingSubsSeparator);
+        if (end < 0)
+        {
+            return;
+        }
+
+        while (end > 0)
+        {
+            SubtitlesMenu.Items.RemoveAt(0);
+            end--;
+        }
+
+        var insert = 0;
+        foreach (var choice in _view.PlayingSubtitleChoices())
+        {
+            var item = new RadioMenuFlyoutItem
+            {
+                Text = choice.Label,
+                GroupName = "GrokPlayingSubs",
+                IsChecked = choice.Selected,
+                Tag = choice.Index
+            };
+            item.Click += PlayingSubtitle_Click;
+            SubtitlesMenu.Items.Insert(insert++, item);
+        }
+    }
+
+    private void PlayingAudio_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is RadioMenuFlyoutItem { Tag: int index })
+        {
+            _view.SelectPlayingAudio(index);
+            ShowActionFeedback(_view.AudioTrackLabel);
+        }
+    }
+
+    private void PlayingSubtitle_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is RadioMenuFlyoutItem { Tag: int index })
+        {
+            _view.SelectPlayingSubtitle(index);
+            ShowActionFeedback(_view.SubtitleTrackLabel);
+        }
     }
 
     private void PlaylistButton_Click(object sender, RoutedEventArgs e)
@@ -1066,6 +1139,8 @@ public sealed partial class MainWindow : Window
 
     private void AppMenu_Opening(object sender, object e)
     {
+        RebuildAudioMenu();
+        RebuildPlayingSubtitleMenu();
         RebuildSubtitleMenu();
         SyncStreamSubtitleMenu();
         BrandChevron.Glyph = "\uE70E";
@@ -1674,7 +1749,8 @@ public sealed partial class MainWindow : Window
             item.AudioLang ?? _view.PreferredAudioLang,
             0,
             item.SkipCaptions ? "off" : item.SubLang ?? _view.PreferredSubLang,
-            item.CaptionUrl);
+            item.CaptionUrl,
+            item.CaptionTracks);
         ShowDownloads();
         ShowActionFeedback("Downloading " + item.Title);
     }
@@ -1691,7 +1767,8 @@ public sealed partial class MainWindow : Window
                 item.AudioLang ?? _view.PreferredAudioLang,
                 0,
                 item.SkipCaptions ? "off" : item.SubLang ?? _view.PreferredSubLang,
-                item.CaptionUrl);
+                item.CaptionUrl,
+                item.CaptionTracks);
             count++;
         }
 
@@ -2029,10 +2106,7 @@ public sealed partial class MainWindow : Window
             LoopIcon.Opacity = _view.LoopIsActive ? 1 : 0.45;
 
             LoopButton.SetValue(ToolTipService.ToolTipProperty, _view.LoopLabel);
-            SetText(AudioTrackText, _view.AudioTrackLabel);
-            SetText(SubtitleTrackText, _view.SubtitleTrackLabel);
-            AudioTrackButton.SetValue(ToolTipService.ToolTipProperty, _view.AudioTrackLabel);
-            SubtitleTrackButton.SetValue(ToolTipService.ToolTipProperty, _view.SubtitleTrackLabel);
+            // Audio / subtitle selection lives in the video context menu.
             ApplyLiveChrome();
             ArmLivePreviewHarvest();
             if (!string.IsNullOrWhiteSpace(_view.StoryboardSpec))
@@ -2536,8 +2610,6 @@ public sealed partial class MainWindow : Window
         yield return ForwardButton;
         yield return OpenButton;
         yield return LoopButton;
-        yield return AudioTrackButton;
-        yield return SubtitleTrackButton;
         yield return ControlPanelButton;
         yield return PlaylistButton;
         yield return PositionTimeHost;
@@ -2718,27 +2790,21 @@ public sealed partial class MainWindow : Window
                     }
 
                     var ready = MapPreviewTime(_previewUi.Current);
-                    // FrameReady is posted from the worker to the UI queue. The
-                    // pointer may move before this callback runs, so never apply
-                    // a previous VOD hover's image merely because it is in the
-                    // same storyboard interval. A fresh request will publish the
-                    // cached storyboard cell for the new exact hover target.
-                    var allowedDelta = _view.IsLive ? 1.5 : 0.15;
-                    if (Math.Abs((time - ready.Time).TotalSeconds) > allowedDelta)
+                    var allowedDelta = _view.IsLive
+                        ? 1.5
+                        : _previewAtlas is not null ? 0.15 : SeekPreviewDisplay.DecoderDeltaSeconds;
+                    if (!SeekPreviewDisplay.Fits(time, ready.Time, allowedDelta))
                     {
                         return;
                     }
 
-                    var cached = LivePlayback.IsUsableStill(path)
-                        ? path
-                        : _previewWork.GetCached(ready.Time, PreviewMaxDelta());
-                    if (cached is not null)
+                    if (!LivePlayback.IsUsableStill(path))
                     {
-                        _previewUi.RememberImage(cached);
-                        ready = ready with { ImagePath = cached };
+                        return;
                     }
 
-                    ShowFlyout(ready);
+                    _previewUi.RememberImage(path);
+                    ShowFlyout(ready with { ImagePath = path });
                 });
             };
         }
@@ -2801,8 +2867,16 @@ public sealed partial class MainWindow : Window
 
         BindPreviewAtlas();
         _previewUi?.SetMedia(path, window);
-        _previewWork?.SetMedia(path, window, prefetch: !_view.IsLive && _previewAtlas is null);
+        _previewWork?.SetMedia(
+            path,
+            window,
+            prefetch: !_view.IsLive && _previewAtlas is null,
+            referer: _view.PlayingReferer);
         _previewWork?.SetAtlas(_previewAtlas);
+        if (!string.IsNullOrWhiteSpace(path) && !_view.IsLive)
+        {
+            _previewWork?.Warm(path);
+        }
     }
 
     private string PreviewMediaKey()
@@ -2838,6 +2912,12 @@ public sealed partial class MainWindow : Window
     private void BindPreviewAtlas()
     {
         var spec = _view.IsLive ? null : _view.StoryboardSpec;
+        var page = _view.VisiblePlaylist.CurrentPath ?? _player.MediaPath;
+        if (!YouTubeCatalog.IsWatchUrl(page) &&
+            !YouTubeCatalog.TryReadVideoId(page, out _))
+        {
+            spec = null;
+        }
         var key = PreviewMediaKey() + "|" + (spec ?? "");
         if (string.Equals(key, _previewAtlasSpec, StringComparison.Ordinal))
         {
@@ -2910,9 +2990,6 @@ public sealed partial class MainWindow : Window
         }
         else
         {
-            // Never display an unrelated old frame for a new hover target.
-            // VOD can retain its fast tier while loading; live shows just the
-            // timestamp when this part of the DVR history has not been captured.
             state = state with { ImagePath = null };
         }
 
@@ -2962,12 +3039,17 @@ public sealed partial class MainWindow : Window
 
     private double PreviewMaxDelta()
     {
+        if (_view.IsLive)
+        {
+            return 3.0;
+        }
+
         if (_previewAtlas is not null)
         {
             return Math.Max(10, _previewAtlas.IntervalSeconds + 1);
         }
 
-        return _view.IsLive ? 3.0 : 4.0;
+        return SeekPreviewDisplay.DecoderDeltaSeconds;
     }
 
     private SeekPreviewState MapPreviewTime(SeekPreviewState state)
@@ -3065,7 +3147,8 @@ public sealed partial class MainWindow : Window
             image,
             x,
             y,
-            scale);
+            scale,
+            holdPreviousImage: !_view.IsLive && image is not null);
     }
 
     [StructLayout(LayoutKind.Sequential)]

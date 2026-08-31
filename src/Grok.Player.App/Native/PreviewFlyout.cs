@@ -95,36 +95,38 @@ internal sealed class PreviewFlyout : IDisposable
         ApplyInputStyles();
     }
 
-    public void Show(string timeText, string? imagePath, int screenX, int screenY, double scale)
+    public void Show(string timeText, string? imagePath, int screenX, int screenY, double scale) =>
+        Show(timeText, imagePath, screenX, screenY, scale, holdPreviousImage: false);
+
+    public void Show(string timeText, string? imagePath, int screenX, int screenY, double scale, bool holdPreviousImage)
     {
         _time.Text = string.IsNullOrWhiteSpace(timeText) ? "00:00" : timeText;
         var missing = string.IsNullOrWhiteSpace(imagePath) || !File.Exists(imagePath);
         if (missing)
         {
-            // Keep the image area black and full-sized when this time has no
-            // preview. Do not mislabel a previous hover target's image.
-            _path = null;
-            _loadGeneration++;
-            _image.Source = null;
-            _image.Visibility = Visibility.Collapsed;
-        }
-        else
-        {
-            if (imagePath is not null && imagePath != _path)
+            if (!holdPreviousImage)
             {
-                _path = imagePath;
-                var generation = ++_loadGeneration;
-                // Never keep the previous hover's bitmap visible while the new
-                // file is being decoded. During continuous pointer movement that
-                // made old high-quality frames appear under unrelated timestamps.
+                _path = null;
+                _loadGeneration++;
                 _image.Source = null;
                 _image.Visibility = Visibility.Collapsed;
-                _ = LoadImageAsync(imagePath, generation);
             }
-            else if (_image.Source is not null)
+        }
+        else if (imagePath is not null && imagePath != _path)
+        {
+            _path = imagePath;
+            var generation = ++_loadGeneration;
+            if (!holdPreviousImage)
             {
-                _image.Visibility = Visibility.Visible;
+                _image.Source = null;
+                _image.Visibility = Visibility.Collapsed;
             }
+
+            _ = LoadImageAsync(imagePath, generation);
+        }
+        else if (_image.Source is not null)
+        {
+            _image.Visibility = Visibility.Visible;
         }
 
         var pixelW = Math.Max(1, (int)Math.Round(DipWidth * scale));

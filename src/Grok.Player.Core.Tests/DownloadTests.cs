@@ -517,12 +517,208 @@ public sealed class DownloadTests
         }
 
         Assert.Equal(DownloadState.Completed, job.State);
-        var sidecar = Path.ChangeExtension(job.OutputPath, ".srt");
+        var sidecar = Path.ChangeExtension(job.OutputPath, null) + ".en.srt";
         Assert.True(File.Exists(sidecar), "missing " + sidecar);
         Assert.Contains("Hello there", File.ReadAllText(sidecar), StringComparison.Ordinal);
+        Assert.False(File.Exists(Path.ChangeExtension(job.OutputPath, ".srt")));
         Directory.Delete(folder, true);
         File.Delete(source);
         File.Delete(captions);
+    }
+
+    [Fact]
+    public void Master_txt_and_proxy_urls_are_treated_as_hls()
+    {
+        Assert.True(DownloadManager.LooksLikeHls("https://hls8.playmix.uno/hls/film.mp4/master.txt"));
+        Assert.True(DownloadManager.LooksLikeHls(
+            "https://fastplay.mom/manifests/episode/master.txt?verify=123-proof"));
+        Assert.True(DownloadManager.LooksLikeHls("https://cdn.example/playlist.txt"));
+        Assert.False(DownloadManager.LooksLikeHls("https://cdn.example/clip.mp4"));
+    }
+
+    [Fact]
+    public void Hls_download_follows_a_master_txt_playlist()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "dl-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        using var handler = new HlsHandler();
+        using var manager = new DownloadManager(new DownloadSettings { Folder = folder, MaxParallel = 1 }, handler);
+        var job = manager.Enqueue("https://cdn.example/master.txt", "Packed", start: true);
+        var until = DateTime.UtcNow.AddSeconds(20);
+        while (DateTime.UtcNow < until && job.State is DownloadState.Queued or DownloadState.Running)
+        {
+            Thread.Sleep(40);
+        }
+
+        Assert.Contains(handler.Requested, url => url.Contains("video.m3u8", StringComparison.OrdinalIgnoreCase));
+        Directory.Delete(folder, true);
+    }
+
+    [Fact]
+    public void Download_sends_the_site_referer_not_youtube()
+    {
+        var source = Path.Combine(Path.GetTempPath(), "src-" + Guid.NewGuid().ToString("N") + ".bin");
+        var folder = Path.Combine(Path.GetTempPath(), "dl-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        File.WriteAllBytes(source, [1, 2, 3, 4, 5, 6, 7, 8]);
+        using var handler = new HeaderHandler(source);
+        using var manager = new DownloadManager(new DownloadSettings { Folder = folder, MaxParallel = 1 }, handler);
+        var job = manager.Enqueue("https://proxy.dmcdn.net/clip.mp4", "Daily", start: true);
+        var until = DateTime.UtcNow.AddSeconds(4);
+        while (DateTime.UtcNow < until && job.State is DownloadState.Queued or DownloadState.Running)
+        {
+            Thread.Sleep(20);
+        }
+
+        Assert.Equal(DownloadState.Completed, job.State);
+        Assert.Contains(handler.Referers, item => item.Contains("dailymotion.com", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(handler.Referers, item => item.Contains("youtube.com", StringComparison.OrdinalIgnoreCase));
+        Directory.Delete(folder, true);
+        File.Delete(source);
+    }
+
+    [Fact]
+    public void Playlist_stub_is_not_marked_complete()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "dl-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        using var handler = new TextHandler("<html>not a video</html>");
+        using var manager = new DownloadManager(new DownloadSettings { Folder = folder, MaxParallel = 1 }, handler);
+        var job = manager.Enqueue("https://cdn.example/clip.mp4", "Stub", start: true);
+        var until = DateTime.UtcNow.AddSeconds(4);
+        while (DateTime.UtcNow < until && job.State is DownloadState.Queued or DownloadState.Running)
+        {
+            Thread.Sleep(20);
+        }
+
+        Assert.Equal(DownloadState.Failed, job.State);
+        Assert.Contains("video file", job.Error ?? "", StringComparison.OrdinalIgnoreCase);
+        Assert.False(File.Exists(job.OutputPath));
+        Directory.Delete(folder, true);
+    }
+
+    [Fact]
+    public void Download_writes_every_language_sidecar()
+    {
+        var source = Path.Combine(Path.GetTempPath(), "src-" + Guid.NewGuid().ToString("N") + ".bin");
+        var folder = Path.Combine(Path.GetTempPath(), "dl-" + Guid.NewGuid().ToString("N"));
+        var english = Path.Combine(Path.GetTempPath(), "en-" + Guid.NewGuid().ToString("N") + ".vtt");
+        var turkish = Path.Combine(Path.GetTempPath(), "tr-" + Guid.NewGuid().ToString("N") + ".vtt");
+        Directory.CreateDirectory(folder);
+        File.WriteAllBytes(source, [1, 2, 3, 4, 5, 6, 7, 8]);
+        File.WriteAllText(english, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nHello\n");
+        File.WriteAllText(turkish, "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nMerhaba\n");
+        using var handler = new FileHandler(source);
+        using var manager = new DownloadManager(new DownloadSettings { Folder = folder, MaxParallel = 1 }, handler);
+        var job = manager.Enqueue(
+            "https://cdn.example/clip.mp4",
+            "BothSubs",
+            start: true,
+            subLang: "tr",
+            captions:
+            [
+                new Grok.Player.Core.Launch.ExternalCaption("en", english, "English"),
+                new Grok.Player.Core.Launch.ExternalCaption("tr", turkish, "Turkish")
+            ]);
+        var until = DateTime.UtcNow.AddSeconds(4);
+        while (DateTime.UtcNow < until && job.State is DownloadState.Queued or DownloadState.Running)
+        {
+            Thread.Sleep(20);
+        }
+
+        Assert.Equal(DownloadState.Completed, job.State);
+        var stem = Path.ChangeExtension(job.OutputPath, null);
+        Assert.Contains("Hello", File.ReadAllText(stem + ".en.srt"), StringComparison.Ordinal);
+        Assert.Contains("Merhaba", File.ReadAllText(stem + ".tr.srt"), StringComparison.Ordinal);
+        Assert.False(File.Exists(Path.ChangeExtension(job.OutputPath, ".srt")));
+        Directory.Delete(folder, true);
+        File.Delete(source);
+        File.Delete(english);
+        File.Delete(turkish);
+    }
+
+    [Fact]
+    public void Sidecar_language_reads_asr_tag_from_filename()
+    {
+        Assert.Equal("tr:asr", Grok.Player.Core.Presentation.PlaybackViewModel.SidecarLanguage("tr-asr"));
+        Assert.Equal("en:asr", Grok.Player.Core.Presentation.PlaybackViewModel.SidecarLanguage("en.asr"));
+        Assert.Equal("tr", Grok.Player.Core.Presentation.PlaybackViewModel.SidecarLanguage("tr"));
+    }
+
+    [Fact]
+    public void Selected_youtube_translate_is_kept_next_to_asr()
+    {
+        var job = new DownloadJob("https://www.youtube.com/watch?v=EmkUwzOG8HU", "Clip", @"D:\clip.mp4")
+        {
+            SubLang = "de",
+            CaptionUrl = "https://www.youtube.com/api/timedtext?v=EmkUwzOG8HU&lang=tr&kind=asr&tlang=de&fmt=vtt"
+        };
+        DownloadManager.AddCaption(job, new Grok.Player.Core.Launch.ExternalCaption(
+            "tr:asr",
+            "https://www.youtube.com/api/timedtext?v=EmkUwzOG8HU&lang=tr&kind=asr&fmt=vtt",
+            "Turkish"));
+        DownloadManager.AddSelectedCaption(job);
+        Assert.Contains(job.Captions, item => item.Language == "de" && YouTubeCatalog.CaptionUrlIsTranslate(item.Url));
+        Assert.Contains(job.Captions, item => item.Language == "tr:asr");
+        Assert.Equal(
+            "https://www.dailymotion.com/video/xap6qz2",
+            DownloadManager.PageReferer("https://www.dailymotion.com/", "https://www.dailymotion.com/video/xap6qz2"));
+    }
+
+    [Fact]
+    public void Caption_sidecar_path_keeps_asr_off_windows_filename()
+    {
+        var dest = DownloadManager.LanguageSidecarPath(@"D:\media\clip.mp4", "tr:asr");
+        Assert.Equal(@"D:\media\clip.tr-asr.srt", dest);
+        Assert.DoesNotContain(':', Path.GetFileName(dest));
+        Assert.Equal("tr-asr", DownloadManager.SafeLangTag("tr:asr"));
+        Assert.Equal("tr", DownloadManager.SafeLangTag("tr"));
+        Assert.Equal("tr", DownloadManager.SafeLangTag("tur"));
+        Assert.EndsWith(".tr.srt", DownloadManager.LanguageSidecarPath(@"D:\media\clip.mp4", "tur"), StringComparison.Ordinal);
+        Assert.EndsWith(".en.srt", DownloadManager.LanguageSidecarPath(@"D:\media\clip.mp4", "eng"), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Error_page_title_is_not_used_as_the_download_name()
+    {
+        Assert.True(StreamCatalog.LooksLikeErrorTitle("404"));
+        Assert.True(StreamCatalog.LooksLikeErrorTitle("403 Forbidden"));
+        Assert.Equal(
+            "breaking-bad-1-sezon-1-bolum-1-izle-16",
+            StreamCatalog.UsableTitle(
+                "404",
+                "https://www.hdfilmcehennemi.now/bolum/breaking-bad-1-sezon-1-bolum-1-izle-16/"));
+    }
+
+    [Fact]
+    public void Remux_writes_language_titles_for_each_audio()
+    {
+        var args = FfmpegMux.AudioMetadataArgs(
+        [
+            (@"D:\a.bin", "tur", "Türkçe"),
+            (@"D:\b.bin", "eng", "English")
+        ]);
+        Assert.Contains("language=tur", args, StringComparison.Ordinal);
+        Assert.Contains("language=eng", args, StringComparison.Ordinal);
+        Assert.Contains("title=\"Türkçe\"", args, StringComparison.Ordinal);
+        Assert.Contains("title=\"English\"", args, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Hls_master_lists_every_audio_rendition()
+    {
+        const string master =
+            """
+            #EXTM3U
+            #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",LANGUAGE="tur",NAME="Turkish",URI="audio-tr.m3u8"
+            #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",LANGUAGE="eng",NAME="Original",URI="audio-en.m3u8"
+            #EXT-X-STREAM-INF:BANDWIDTH=800000,AUDIO="a"
+            video.m3u8
+            """;
+        var tracks = HlsPlaylist.AudioTracks(master, "https://cdn.example/master.m3u8");
+        Assert.Equal(2, tracks.Count);
+        Assert.Contains(tracks, item => item.Language == "tur" && item.Url.EndsWith("audio-tr.m3u8", StringComparison.Ordinal));
+        Assert.Contains(tracks, item => item.Language == "eng" && item.Url.EndsWith("audio-en.m3u8", StringComparison.Ordinal));
     }
 
     private sealed class HlsHandler : HttpMessageHandler
@@ -541,7 +737,7 @@ public sealed class DownloadTests
             Requested.Add(url);
             var body = url switch
             {
-                "https://cdn.example/master.m3u8" =>
+                "https://cdn.example/master.m3u8" or "https://cdn.example/master.txt" =>
                     "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"Turkish\",LANGUAGE=\"tr\",URI=\"audio-tr.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,CODECS=\"avc1.4d401e\",AUDIO=\"a\"\nvideo.m3u8\n",
                 "https://cdn.example/video.m3u8" =>
                     "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nv0.ts\n#EXT-X-ENDLIST\n",
@@ -554,6 +750,55 @@ public sealed class DownloadTests
                 Content = new StringContent(body)
             };
         }
+    }
+
+    private sealed class HeaderHandler : HttpMessageHandler
+    {
+        private readonly string _path;
+
+        public HeaderHandler(string path) => _path = path;
+
+        public List<string> Referers { get; } = [];
+
+        protected override HttpResponseMessage Send(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Respond(request);
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(Respond(request));
+
+        private HttpResponseMessage Respond(HttpRequestMessage request)
+        {
+            Referers.Add(request.Headers.Referrer?.ToString() ??
+                         (request.Headers.TryGetValues("Referer", out var values)
+                             ? string.Join(",", values)
+                             : ""));
+            var bytes = File.ReadAllBytes(_path);
+            var response = new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(bytes)
+            };
+            response.Content.Headers.ContentLength = bytes.Length;
+            return response;
+        }
+    }
+
+    private sealed class TextHandler : HttpMessageHandler
+    {
+        private readonly string _body;
+
+        public TextHandler(string body) => _body = body;
+
+        protected override HttpResponseMessage Send(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Respond();
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(Respond());
+
+        private HttpResponseMessage Respond() =>
+            new(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(_body)
+            };
     }
 
     private sealed class FileHandler : HttpMessageHandler

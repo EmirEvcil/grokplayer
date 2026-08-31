@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Grok.Player.Core.Launch;
 
 namespace Grok.Player.Core.Media;
 
@@ -612,6 +613,124 @@ public static class YouTubeCatalog
         {
             return null;
         }
+    }
+
+    public static IReadOnlyList<ExternalCaption> ParseCaptionTracks(string? json)
+    {
+        var list = new List<ExternalCaption>();
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return list;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (!document.RootElement.TryGetProperty("captions", out var captions) ||
+                !captions.TryGetProperty("playerCaptionsTracklistRenderer", out var renderer) ||
+                !renderer.TryGetProperty("captionTracks", out var tracks) ||
+                tracks.ValueKind != JsonValueKind.Array)
+            {
+                return list;
+            }
+
+            foreach (var track in tracks.EnumerateArray())
+            {
+                var url = ReadString(track, "baseUrl");
+                if (string.IsNullOrWhiteSpace(url))
+                {
+                    continue;
+                }
+
+                var code = ReadString(track, "languageCode") ?? "";
+                var kind = ReadString(track, "kind") ?? "";
+                var asr = kind.Equals("asr", StringComparison.OrdinalIgnoreCase);
+                var lang = MediaLanguage.Normalize(code, keepKind: true);
+                if (lang.Length == 0)
+                {
+                    lang = "und";
+                }
+
+                if (asr && !string.Equals(MediaLanguage.Kind(lang), "asr", StringComparison.OrdinalIgnoreCase))
+                {
+                    lang += ":asr";
+                }
+
+                var name = CaptionTrackName(track);
+                if (string.IsNullOrWhiteSpace(name))
+                {
+                    name = lang;
+                }
+
+                list.Add(new ExternalCaption(lang, EnsureVtt(url), name));
+            }
+        }
+        catch (Exception)
+        {
+        }
+
+        return list;
+    }
+
+    public static IReadOnlyList<ExternalCaption> ListCaptions(string? videoIdOrUrl)
+    {
+        if (!TryReadVideoId(videoIdOrUrl, out var id))
+        {
+            return [];
+        }
+
+        string? visitor = null;
+        var page = FetchText("https://www.youtube.com/watch?v=" + Uri.EscapeDataString(id), ChromeUa);
+        if (!string.IsNullOrWhiteSpace(page))
+        {
+            visitor = ExtractVisitorData(page);
+            var tracks = ParseCaptionTracks(ExtractAssignedJson(page, "ytInitialPlayerResponse"));
+            if (tracks.Count > 0)
+            {
+                return tracks;
+            }
+        }
+
+        foreach (var client in PlayerClients(id, visitor, "en"))
+        {
+            var tracks = ParseCaptionTracks(FetchPlayer(client, visitor));
+            if (tracks.Count > 0)
+            {
+                return tracks;
+            }
+        }
+
+        return [];
+    }
+
+    private static string? CaptionTrackName(JsonElement track)
+    {
+        if (!track.TryGetProperty("name", out var name))
+        {
+            return null;
+        }
+
+        var simple = ReadString(name, "simpleText");
+        if (!string.IsNullOrWhiteSpace(simple))
+        {
+            return simple;
+        }
+
+        if (!name.TryGetProperty("runs", out var runs) || runs.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        foreach (var run in runs.EnumerateArray())
+        {
+            var text = ReadString(run, "text");
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                return text;
+            }
+        }
+
+        return null;
     }
 
     public static byte[]? DownloadCaption(string url) => DownloadCaption(url, null);

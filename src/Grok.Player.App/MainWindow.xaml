@@ -90,7 +90,8 @@
                 <MenuFlyoutSubItem Text="Playback">
                     <MenuFlyoutItem IsEnabled="False" Text="Coming soon" />
                 </MenuFlyoutSubItem>
-                <MenuFlyoutSubItem Text="Subtitles">
+                <MenuFlyoutSubItem x:Name="SubtitlesMenu" Text="Subtitles">
+                    <MenuFlyoutSeparator x:Name="PlayingSubsSeparator" />
                     <MenuFlyoutSubItem x:Name="AddSelectSubtitlesMenu" Text="Add/select subtitles">
                         <MenuFlyoutItem Click="LoadSubtitle_Click" Text="Load subtitle…" />
                         <MenuFlyoutItem Click="AddSubtitle_Click" Text="Add subtitle" />
@@ -127,8 +128,8 @@
                 <MenuFlyoutSubItem Text="Video">
                     <MenuFlyoutItem IsEnabled="False" Text="Coming soon" />
                 </MenuFlyoutSubItem>
-                <MenuFlyoutSubItem Text="Audio">
-                    <MenuFlyoutItem IsEnabled="False" Text="Coming soon" />
+                <MenuFlyoutSubItem x:Name="AudioMenu" Text="Audio">
+                    <MenuFlyoutItem x:Name="AudioEmptyItem" IsEnabled="False" Text="No audio tracks" />
                 </MenuFlyoutSubItem>
                 <MenuFlyoutSubItem Text="Filters">
                     <MenuFlyoutItem IsEnabled="False" Text="Coming soon" />
@@ -759,12 +760,6 @@
                         </StackPanel>
                         <Button x:Name="LoopButton" Style="{StaticResource TransportIconButton}" Click="LoopButton_Click" ToolTipService.ToolTip="No loop">
                             <FontIcon x:Name="LoopIcon" FontSize="14" Glyph="&#xE8EE;" />
-                        </Button>
-                        <Button x:Name="AudioTrackButton" Style="{StaticResource TransportLabelButton}" Click="AudioTrackButton_Click" ToolTipService.ToolTip="Audio track">
-                            <TextBlock x:Name="AudioTrackText" FontSize="11" Text="Audio" />
-                        </Button>
-                        <Button x:Name="SubtitleTrackButton" Style="{StaticResource TransportLabelButton}" Click="SubtitleTrackButton_Click" ToolTipService.ToolTip="Subtitles">
-                            <TextBlock x:Name="SubtitleTrackText" FontSize="11" Text="Subs" />
                         </Button>
                     </StackPanel>
                     <StackPanel HorizontalAlignment="Right" Orientation="Horizontal">

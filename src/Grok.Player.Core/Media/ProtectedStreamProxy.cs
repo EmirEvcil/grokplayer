@@ -20,6 +20,19 @@ internal static class ProtectedStreamProxy
         _ = Task.Run(AcceptLoop);
     }
 
+    internal static bool TryUnwrap(string? url, out string target)
+    {
+        target = "";
+        if (string.IsNullOrWhiteSpace(url) ||
+            !Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+            uri.Host is not ("127.0.0.1" or "localhost" or "[::1]"))
+        {
+            return false;
+        }
+
+        return TryTarget(uri.AbsolutePath, out _, out target);
+    }
+
     internal static string Register(string manifestUrl, string referer, string secret, long startTime)
     {
         var token = Guid.NewGuid().ToString("N");

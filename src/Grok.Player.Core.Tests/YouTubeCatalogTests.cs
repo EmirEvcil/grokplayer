@@ -484,6 +484,23 @@ public sealed class YouTubeCatalogTests
     }
 
     [Fact]
+    public void Parse_caption_tracks_keeps_official_and_asr_apart()
+    {
+        var tracks = YouTubeCatalog.ParseCaptionTracks(
+            """
+            {"captions":{"playerCaptionsTracklistRenderer":{"captionTracks":[
+              {"baseUrl":"https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=en","languageCode":"en","name":{"simpleText":"English"}},
+              {"baseUrl":"https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=en&kind=asr","languageCode":"en","kind":"asr","name":{"simpleText":"English (auto-generated)"}},
+              {"baseUrl":"https://www.youtube.com/api/timedtext?v=abcdefghijk&lang=tr","languageCode":"tr","name":{"simpleText":"Turkish"}}
+            ]}}}
+            """);
+        Assert.Equal(3, tracks.Count);
+        Assert.Contains(tracks, item => item.Language == "en" && item.Name == "English");
+        Assert.Contains(tracks, item => item.Language == "en:asr" && item.Url.Contains("kind=asr", StringComparison.Ordinal));
+        Assert.Contains(tracks, item => item.Language == "tr" && item.Url.Contains("fmt=vtt", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Parse_caption_url_prefers_asr_when_requested()
     {
         var json =
