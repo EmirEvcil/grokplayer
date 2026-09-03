@@ -765,10 +765,30 @@ public sealed class StreamCatalogTests
         var embeds = StreamCatalog.AjaxPlayerEmbeds(html ?? "", page);
         var local = StreamCatalog.SidecarCaptionsIn(html);
         var caps = StreamCatalog.SidecarCaptionsFromPage(page);
+        var playable = StreamCatalog.Resolve(page);
         Assert.False(fields is null, "wordpress ajax player fields missing");
         Assert.Contains("SetPlay", fields!.Value.Players, StringComparer.OrdinalIgnoreCase);
         Assert.Contains(embeds, item => item.Contains("setplay.", StringComparison.OrdinalIgnoreCase));
         Assert.True(local.Count == 0, "static episode HTML has no VTT; Open must transfer JW sidecar files");
+        Assert.Contains(caps, item => item.Language == "tr" && item.Url.Contains("tur.vtt", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(caps, item => item.Language == "en" && item.Url.Contains("eng.vtt", StringComparison.OrdinalIgnoreCase));
+        Assert.NotNull(playable);
+        Assert.StartsWith("webvtt:", playable!.StoryboardSpec, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Fastplay_config_exposes_its_native_webvtt_preview_atlas()
+    {
+        const string html = """
+            <script>window.FSP={tracks:[
+              {"file":"https://cdn.example/subtitle/tur.vtt","kind":"captions"},
+              {"file":"https://cdn.example/preview/thumbnails.vtt?proof=1","kind":"thumbnails"}
+            ]};</script>
+            """;
+
+        Assert.Equal(
+            "webvtt:https://cdn.example/preview/thumbnails.vtt?proof=1",
+            StreamCatalog.PreviewStoryboardIn(html, "https://fastplay.example/video/episode"));
     }
 
     [Fact]

@@ -511,7 +511,53 @@ public sealed class SeekPreviewTests
             engine.CaptureFast(TimeSpan.FromSeconds(4));
             Assert.Contains(fake.Lifecycle, item => item.Contains("vf=scale=160:-2", StringComparison.Ordinal));
             engine.Capture(TimeSpan.FromSeconds(4));
-            Assert.Contains(fake.Lifecycle, item => item.Contains("vf=scale=512:-2", StringComparison.Ordinal));
+            Assert.Contains(fake.Lifecycle, item => item.Contains("vf=scale=320:-2", StringComparison.Ordinal));
+            Assert.Contains(fake.Lifecycle, item => item.Contains("property:pause=False", StringComparison.Ordinal));
+            Assert.Contains(fake.Lifecycle, item => item.Contains("property:pause=True", StringComparison.Ordinal));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void Network_capture_returns_null_when_time_pos_throws()
+    {
+        var fake = new FakeMpvNative { AutoDurationSeconds = 3600, ThrowOnTimePos = true };
+        using var engine = new SeekPreviewEngine(fake);
+        engine.Prepare("https://cdn.example/vod.m3u8");
+        Assert.Null(engine.CaptureFast(TimeSpan.FromMinutes(26)));
+        Assert.Null(engine.Capture(TimeSpan.FromMinutes(26)));
+    }
+
+    [Fact]
+    public void Network_capture_rejects_a_black_still()
+    {
+        var fake = new FakeMpvNative { AutoDurationSeconds = 3600, WriteBlackScreenshots = true };
+        using var engine = new SeekPreviewEngine(fake);
+        engine.Prepare("https://cdn.example/vod.m3u8");
+        Assert.Null(engine.CaptureFast(TimeSpan.FromMinutes(2)));
+        Assert.Null(engine.Capture(TimeSpan.FromMinutes(2)));
+    }
+
+    [Fact]
+    public void Failed_prepare_is_retried_on_the_next_capture()
+    {
+        var fake = new FakeMpvNative { AutoLoad = false };
+        using var engine = new SeekPreviewEngine(fake);
+        var path = TestMedia.CreateTempFile();
+        try
+        {
+            engine.Prepare(path);
+            Assert.Null(engine.Capture(TimeSpan.FromSeconds(4)));
+
+            fake.AutoLoad = true;
+            fake.Seed("duration", 120d);
+            fake.Enqueue(Grok.Player.Core.Native.MpvEvent.FileLoaded());
+            var shot = engine.Capture(TimeSpan.FromSeconds(4));
+            Assert.NotNull(shot);
+            Assert.True(File.Exists(shot));
         }
         finally
         {
@@ -686,6 +732,63 @@ public sealed class SeekPreviewTests
         }
 
         Assert.Equal(published[1], scheduler.GetCached(TimeSpan.FromSeconds(12)));
+    }
+
+    [Fact]
+    public void Network_vod_coverage_stays_on_the_cheap_grid()
+    {
+        var renderer = new RecordingRenderer();
+        using var scheduler = new SeekPreviewScheduler(renderer, bucketSeconds: 1);
+        scheduler.SetMedia("https://cdn.example/vod.m3u8", TimeSpan.FromMinutes(58), prefetch: true);
+        var until = DateTime.UtcNow.AddSeconds(2);
+        while (DateTime.UtcNow < until)
+        {
+            lock (renderer.Times)
+            {
+                if (renderer.Times.Count >= 16)
+                {
+                    break;
+                }
+            }
+
+            Thread.Sleep(20);
+        }
+
+        lock (renderer.Times)
+        {
+            Assert.InRange(renderer.Times.Count, 16, 96);
+        }
+    }
+
+    [Fact]
+    public void Coverage_grid_upgrades_nearest_the_last_hover()
+    {
+        var renderer = new TieredRenderer();
+        using var scheduler = new SeekPreviewScheduler(renderer, bucketSeconds: 1);
+        scheduler.SetMedia(@"C:\a.mp4", TimeSpan.FromSeconds(10), prefetch: true);
+        Assert.True(WaitFor(() =>
+        {
+            lock (renderer.Steps)
+            {
+                return renderer.Steps.Count >= 1;
+            }
+        }));
+
+        scheduler.Request(TimeSpan.FromSeconds(0.8));
+        Assert.True(WaitFor(() =>
+        {
+            lock (renderer.Steps)
+            {
+                return renderer.Steps.FindAll(step => step == "high").Count >= 2;
+            }
+        }));
+
+        lock (renderer.Steps)
+        {
+            Assert.Equal("fast", renderer.Steps[0]);
+            Assert.Contains("high", renderer.Steps);
+            Assert.True(renderer.Steps.FindAll(step => step == "high").Count >= 2);
+        }
     }
 
     [Fact]

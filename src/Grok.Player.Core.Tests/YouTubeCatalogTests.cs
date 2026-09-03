@@ -251,6 +251,20 @@ public sealed class YouTubeCatalogTests
     }
 
     [Fact]
+    public void Extension_protocol_keeps_generic_webvtt_preview_manifest()
+    {
+        const string preview = "https://cdn.example/previews/thumbnails.vtt?token=proof";
+        var link = ExternalOpen.ToProtocol(
+            "https://cdn.example/master.m3u8",
+            "Episode",
+            StreamKind.Vod,
+            previewUrl: preview);
+
+        Assert.True(ExternalOpen.TryParse(link, out var open));
+        Assert.Equal(preview, open.PreviewUrl);
+    }
+
+    [Fact]
     public void Sidecar_loader_keeps_unlabeled_vtt_files()
     {
         var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".vtt");

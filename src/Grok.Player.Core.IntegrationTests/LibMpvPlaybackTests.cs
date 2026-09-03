@@ -176,4 +176,52 @@ public sealed class LibMpvPlaybackTests
         var path = engine.Capture(TimeSpan.FromSeconds(1));
         Assert.True(path is not null && File.Exists(path) && new FileInfo(path).Length > 32, $"preview={path}");
     }
+
+    [LibMpvFact]
+    public void Seek_preview_two_times_are_real_and_not_the_same_bytes()
+    {
+        var sample = GeneratedMedia.TryCreateSample();
+        if (sample is null)
+        {
+            return;
+        }
+
+        using var engine = SeekPreviewEngine.Create();
+        engine.Prepare(sample);
+        var first = engine.CaptureFast(TimeSpan.FromSeconds(0.4));
+        var second = engine.CaptureFast(TimeSpan.FromSeconds(2.2));
+        Assert.True(first is not null && File.Exists(first) && new FileInfo(first).Length > 800, "first=" + first);
+        Assert.True(second is not null && File.Exists(second) && new FileInfo(second).Length > 800, "second=" + second);
+        Assert.NotEqual(File.ReadAllBytes(first), File.ReadAllBytes(second));
+    }
+
+    [LibMpvFact]
+    public void Named_osd_overlay_argv_is_rejected_positional_is_accepted()
+    {
+        using var native = new MpvNative();
+        native.SetOption("vo", "null");
+        native.SetOption("ao", "null");
+        native.SetOption("osd-level", "0");
+        native.Initialize();
+        Assert.Throws<MpvException>(() => native.Command(
+            "osd-overlay",
+            "id=42",
+            "format=ass-events",
+            "res_x=1920",
+            "res_y=1080",
+            "z=3000",
+            "data=Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an2}HELLO"));
+        native.Command("osd-overlay", "42", "ass-events", "{\\an2\\bord3}HELLO", "1920", "1080", "3000");
+        native.Command("osd-overlay", "42", "none", "");
+    }
+
+    [LibMpvFact]
+    public void Ass_overlay_stays_on_a_live_handle()
+    {
+        using var host = PlayerHost.CreateHeadless();
+        host.SetAssOverlay("BREAKING BAD");
+        host.ProcessPendingEvents();
+        host.SetAssOverlay(null);
+        host.ProcessPendingEvents();
+    }
 }

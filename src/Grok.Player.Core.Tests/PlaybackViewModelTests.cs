@@ -581,6 +581,128 @@ public sealed class PlaybackViewModelTests
     }
 
     [Fact]
+    public void Selecting_a_network_sidecar_writes_an_ass_overlay_even_when_vf_add_succeeds()
+    {
+        var english = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-en.vtt");
+        var turkish = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-tr.vtt");
+        File.WriteAllText(english, "WEBVTT\n\n00:00:00.000 --> 00:00:05.000\nI am the one who knocks\n");
+        File.WriteAllText(turkish, "WEBVTT\n\n00:00:00.000 --> 00:00:05.000\nKapıyı çalan benim\n");
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+        using var view = new PlaybackViewModel(host);
+        Assert.True(view.AddStream(
+            ExternalOpen.ToProtocol(
+                "https://cdn.example/bb.m3u8",
+                "BB",
+                StreamKind.Vod,
+                captions:
+                [
+                    new ExternalCaption("en", english, "English"),
+                    new ExternalCaption("tr", turkish, "Turkish")
+                ]),
+            play: true));
+        var until = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < until)
+        {
+            host.ProcessPendingEvents();
+            view.CycleSubtitle();
+            if ((view.OnScreenCaption ?? "").Contains("knocks", StringComparison.OrdinalIgnoreCase))
+            {
+                break;
+            }
+
+            Thread.Sleep(20);
+        }
+
+        Assert.Contains("knocks", view.OnScreenCaption, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(
+            fake.Commands,
+            command => command.Length >= 3 &&
+                       command[0] == "osd-overlay" &&
+                       command.Contains("ass-events") &&
+                       command.Any(arg => arg.Contains("\\bord3", StringComparison.Ordinal)) &&
+                       command.Any(arg => arg.Contains("knocks", StringComparison.OrdinalIgnoreCase)));
+
+        until = DateTime.UtcNow.AddSeconds(2);
+        while (DateTime.UtcNow < until)
+        {
+            view.CycleSubtitle();
+            if ((view.OnScreenCaption ?? "").Contains("çalan", StringComparison.OrdinalIgnoreCase))
+            {
+                break;
+            }
+
+            Thread.Sleep(20);
+        }
+
+        Assert.Contains("çalan", view.OnScreenCaption, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(
+            fake.Commands,
+            command => command.Length >= 3 &&
+                       command[0] == "osd-overlay" &&
+                       command.Contains("ass-events") &&
+                       command.Any(arg => arg.Contains("çalan", StringComparison.OrdinalIgnoreCase)));
+
+        view.Subtitles.Active!.Document.Cues[0].Spans =
+            [new CaptionSpan("Kapıyı çalan benim", "#00FF00", Bold: true)];
+        view.Subtitles.PersistActive();
+        host.ProcessPendingEvents();
+        var styledOverlay = fake.Commands.Last(command =>
+            command.Length >= 4 && command[0] == "osd-overlay" && command[2] == "ass-events");
+        Assert.Contains("\\c&H0000FF00&", styledOverlay[3], StringComparison.Ordinal);
+        Assert.Contains("\\b1", styledOverlay[3], StringComparison.Ordinal);
+        File.Delete(english);
+        File.Delete(turkish);
+    }
+
+    [Fact]
+    public void Network_sidecar_overlay_is_hidden_before_its_first_cue_and_between_cues()
+    {
+        var caption = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-tr.vtt");
+        File.WriteAllText(
+            caption,
+            "WEBVTT\n\n00:01:08.151 --> 00:01:10.000\nİlk altyazı\n\n00:01:15.000 --> 00:01:17.000\nİkinci altyazı\n");
+        try
+        {
+            var fake = new FakeMpvNative();
+            using var host = new PlayerHost(fake, PlayerHostOptions.ForAutomatedTests());
+            using var view = new PlaybackViewModel(host);
+            Assert.True(view.AddStream(
+                ExternalOpen.ToProtocol(
+                    "https://cdn.example/movie.m3u8",
+                    "Movie",
+                    StreamKind.Vod,
+                    captions: [new ExternalCaption("tr", caption, "Turkish")]),
+                play: true));
+            var until = DateTime.UtcNow.AddSeconds(3);
+            while (DateTime.UtcNow < until && view.Subtitles.Applied is null)
+            {
+                host.ProcessPendingEvents();
+                Thread.Sleep(20);
+            }
+
+            Assert.NotNull(view.Subtitles.Applied);
+            host.Seek(TimeSpan.Zero);
+            host.ProcessPendingEvents();
+            Assert.Null(view.OnScreenCaption);
+            Assert.Contains(fake.Commands, command =>
+                command.Length >= 3 && command[0] == "osd-overlay" && command[2] == "none");
+
+            host.Seek(TimeSpan.FromSeconds(69));
+            host.ProcessPendingEvents();
+            Assert.Equal("İlk altyazı", view.OnScreenCaption);
+
+            host.Seek(TimeSpan.FromSeconds(12));
+            host.ProcessPendingEvents();
+            Assert.Null(view.OnScreenCaption);
+        }
+        finally
+        {
+            File.Delete(caption);
+        }
+    }
+
+    [Fact]
     public void Cycling_youtube_captions_keeps_the_karaoke_play_file()
     {
         var vtt = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + "-yt.vtt");

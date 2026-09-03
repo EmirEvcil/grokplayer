@@ -56,6 +56,55 @@ public sealed class VideoTests
     }
 
     [Fact]
+    public void Enhance_graph_is_null_when_off()
+    {
+        Assert.Null(VideoEnhanceSpec.D3d11Vpp(false, 2, false));
+    }
+
+    [Fact]
+    public void Enhance_graph_combines_rtx_super_resolution_and_hdr()
+    {
+        var vsr = VideoEnhanceSpec.D3d11Vpp(true, 2.4, false);
+        Assert.Equal("d3d11vpp=scaling-mode=nvidia:scale=2", vsr);
+        var both = VideoEnhanceSpec.D3d11Vpp(true, 3, true);
+        Assert.Equal("d3d11vpp=scaling-mode=nvidia:scale=3:format=p010:nvidia-true-hdr", both);
+        Assert.Equal(2, VideoEnhanceSpec.Scale(1080, 2160));
+        Assert.Equal(1, VideoEnhanceSpec.Scale(2160, 1080));
+        Assert.Equal("yes", VideoEnhanceSpec.Hint(HdrOutputMode.Native));
+        Assert.Equal("no", VideoEnhanceSpec.Hint(HdrOutputMode.Off));
+        Assert.Equal("source", VideoEnhanceSpec.HintMode(HdrOutputMode.Rtx));
+        Assert.Equal("source", VideoEnhanceSpec.HintMode(HdrOutputMode.Native));
+    }
+
+    [Fact]
+    public void Player_writes_hdr_hint_and_rtx_filter()
+    {
+        var fake = new FakeMpvNative();
+        using var host = new PlayerHost(fake, new PlayerHostOptions
+        {
+            Headless = false,
+            HardwareDecode = true,
+            UseBackgroundEventLoop = false
+        });
+        host.SetVideoEnhance(true, 2, HdrOutputMode.Rtx);
+        Assert.Contains(fake.Lifecycle, item => item == "property:target-colorspace-hint=yes");
+        Assert.Contains(fake.Lifecycle, item => item == "property:target-colorspace-hint-mode=source");
+        Assert.Contains(fake.Lifecycle, item => item == "property:hwdec=d3d11va");
+        Assert.Contains(
+            fake.Commands,
+            command => command.Length >= 3 &&
+                       command[0] == "vf" &&
+                       (command[1] == "pre" || command[1] == "add") &&
+                       command[2].Contains("d3d11vpp=", StringComparison.Ordinal) &&
+                       command[2].Contains("scaling-mode=nvidia", StringComparison.Ordinal) &&
+                       command[2].Contains("nvidia-true-hdr", StringComparison.Ordinal));
+
+        host.SetVideoEnhance(false, 2, HdrOutputMode.Off);
+        Assert.Contains(fake.Lifecycle, item => item == "property:target-colorspace-hint=no");
+        Assert.Contains(fake.Lifecycle, item => item == "property:hwdec=d3d11va-copy");
+    }
+
+    [Fact]
     public void Model_defaults_and_reset_to_fifty()
     {
         var model = new VideoModel();
@@ -66,6 +115,8 @@ public sealed class VideoTests
         Assert.False(model.Softer);
         Assert.False(model.Sharpen);
         Assert.False(model.Deblock);
+        Assert.False(model.SuperResolution);
+        Assert.Equal(HdrOutputMode.Native, model.Hdr);
 
         model.SetBrightness(12);
         model.ResetBrightness();

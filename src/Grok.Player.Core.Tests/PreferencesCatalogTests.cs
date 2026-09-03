@@ -11,9 +11,11 @@ public sealed class PreferencesCatalogTests
         Assert.NotNull(deinterlace);
         Assert.Equal("Deinterlacing", deinterlace.Title);
         var tabs = deinterlace.Tabs;
-        Assert.Equal(10, tabs.Count);
+        Assert.Equal(12, tabs.Count);
         Assert.Contains(tabs, page => page.Id == "video-crop");
         Assert.Contains(tabs, page => page.Id == "video-resize");
+        Assert.Contains(tabs, page => page.Id == "video-hdr");
+        Assert.Contains(tabs, page => page.Id == "video-super-resolution");
         Assert.Same(tabs, PreferencesCatalog.Find("video")!.Tabs);
     }
 
@@ -31,6 +33,7 @@ public sealed class PreferencesCatalogTests
     {
         var hits = PreferencesCatalog.Search("crop");
         Assert.Contains(hits, page => page.Id == "video-crop");
+        Assert.Contains(PreferencesCatalog.Search("hdr"), page => page.Id == "video-hdr");
         Assert.DoesNotContain(hits, page => page.Id == "audio");
         Assert.True(PreferencesCatalog.Matches(PreferencesCatalog.Find("video")!, "crop"));
     }

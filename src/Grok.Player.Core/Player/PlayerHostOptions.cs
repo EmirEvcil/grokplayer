@@ -8,7 +8,7 @@ public sealed class PlayerHostOptions
 
     public string Hwdec { get; init; } = "d3d11va-copy";
 
-    public string VideoOutput { get; init; } = "gpu";
+    public string VideoOutput { get; init; } = "gpu-next";
 
     public string GpuApi { get; init; } = "d3d11";
 
@@ -25,7 +25,7 @@ public sealed class PlayerHostOptions
         Headless = false,
         HardwareDecode = true,
         Hwdec = "d3d11va-copy",
-        VideoOutput = "gpu",
+        VideoOutput = "gpu-next",
         WindowHandle = hwnd,
         UseBackgroundEventLoop = true
     };

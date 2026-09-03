@@ -653,6 +653,80 @@ public sealed class PlayerHost : IDisposable
         _mpv.SetPropertyString("vf", graph);
     }
 
+    public VideoEnhanceResult SetVideoEnhance(bool superResolution, double scale, HdrOutputMode hdr)
+    {
+        EnsureNotDisposed();
+        var hdrApplied = ApplyHdrOutput(hdr);
+        var vppNeeded = VideoEnhanceSpec.NeedsVideoProcessor(superResolution, hdr);
+        if (_options.Headless)
+        {
+            return new VideoEnhanceResult(hdrApplied, VppNeeded: vppNeeded, VppApplied: !vppNeeded);
+        }
+
+        if (_options.HardwareDecode)
+        {
+            TrySetProperty(
+                "hwdec",
+                VideoEnhanceSpec.NeedsZeroCopyDecode(superResolution, hdr) ? "d3d11va" : _options.Hwdec);
+        }
+
+        try
+        {
+            _mpv.Command("vf", "remove", "@enhance");
+        }
+        catch (MpvException)
+        {
+        }
+
+        var graph = VideoEnhanceSpec.D3d11Vpp(superResolution, scale, hdr == HdrOutputMode.Rtx);
+        if (graph is null)
+        {
+            return new VideoEnhanceResult(hdrApplied, VppNeeded: false, VppApplied: true);
+        }
+
+        if (TryInstallEnhance(graph))
+        {
+            return new VideoEnhanceResult(hdrApplied, VppNeeded: true, VppApplied: true);
+        }
+
+        return new VideoEnhanceResult(hdrApplied, VppNeeded: true, VppApplied: false);
+    }
+
+    private bool TryInstallEnhance(string graph)
+    {
+        try
+        {
+            _mpv.Command("vf", "pre", "@enhance:" + graph);
+            return true;
+        }
+        catch (MpvException)
+        {
+        }
+
+        try
+        {
+            _mpv.Command("vf", "add", "@enhance:" + graph);
+            return true;
+        }
+        catch (MpvException)
+        {
+            return false;
+        }
+    }
+
+    private bool ApplyHdrOutput(HdrOutputMode hdr)
+    {
+        var hint = VideoEnhanceSpec.Hint(hdr);
+        var mode = VideoEnhanceSpec.HintMode(hdr);
+        TrySetProperty("target-colorspace-hint", hint);
+        TrySetProperty("target-colorspace-hint-mode", mode);
+        TrySetProperty("hdr-compute-peak", hdr == HdrOutputMode.Off ? "no" : "yes");
+        TrySetProperty("tone-mapping", "auto");
+        TrySetProperty("target-prim", "auto");
+        TrySetProperty("target-trc", "auto");
+        return true;
+    }
+
     public string? GetVideoFilter()
     {
         EnsureNotDisposed();
@@ -718,13 +792,43 @@ public sealed class PlayerHost : IDisposable
         return _mpv.GetPropertyLong(name);
     }
 
+    private void RemoveExternalSubtitles()
+    {
+        try
+        {
+            _mpv.Command("sub-remove");
+        }
+        catch (MpvException)
+        {
+        }
+
+        for (var n = 0; n < 24; n++)
+        {
+            if (!ListTracks("sub").Any(track => track.External))
+            {
+                return;
+            }
+
+            try
+            {
+                _mpv.Command("sub-remove");
+            }
+            catch (MpvException)
+            {
+                return;
+            }
+        }
+    }
+
     public bool SetSubtitleFile(string? path)
     {
         EnsureNotDisposed();
         _styledSubtitle = path?.EndsWith(".ass", StringComparison.OrdinalIgnoreCase) == true;
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
         {
+            RemoveExternalSubtitles();
             TrySetProperty("sid", "no");
+            TrySetProperty("sub-visibility", "no");
             return string.IsNullOrWhiteSpace(path);
         }
 
@@ -859,58 +963,39 @@ public sealed class PlayerHost : IDisposable
 
     public void SetAssOverlay(string? text)
     {
+        SetAssOverlayCore(OverlayEventText(text));
+    }
+
+    internal void SetStyledAssOverlay(string? assText)
+    {
+        SetAssOverlayCore(string.IsNullOrWhiteSpace(assText) ? "" : assText.Trim());
+    }
+
+    private void SetAssOverlayCore(string body)
+    {
         EnsureNotDisposed();
-        var body = OverlayEventText(text);
         try
         {
             if (body.Length == 0)
             {
-                _mpv.Command("osd-overlay", "id=42", "format=none", "data=");
-                try
-                {
-                    _mpv.Command("show-text", "", "0");
-                }
-                catch (MpvException)
-                {
-                }
-
+                // Positional mpv_command: id, format, data. Named id=42 is rejected.
+                _mpv.Command("osd-overlay", "42", "none", "");
                 return;
             }
 
-            TrySetProperty("osd-font-size", "36");
-            TrySetProperty("osd-border-size", "2.5");
-            TrySetProperty("osd-shadow-offset", "1");
-            TrySetProperty("osd-color", "#FFFFFFFF");
-            TrySetProperty("osd-border-color", "#FF000000");
+            // osd-* options do not style ass-events. Outline lives in the
+            // override tags. Data is event text only — not a Dialogue: line.
             _mpv.Command(
                 "osd-overlay",
-                "id=42",
-                "format=ass-events",
-                "res_x=1920",
-                "res_y=1080",
-                "z=10",
-                "data=Dialogue: 0,0:00:00.00,9:59:59.99,Default,,0,0,0,,{\\an2}" + body);
+                "42",
+                "ass-events",
+                "{\\an2\\bord3\\shad1\\fs46\\c&H00FFFFFF&\\3c&H00000000&}" + body,
+                "1920",
+                "1080",
+                "3000");
         }
         catch (MpvException)
         {
-            try
-            {
-                if (body.Length == 0)
-                {
-                    _mpv.Command("show-text", "", "0");
-                    return;
-                }
-
-                TrySetProperty("osd-align-x", "center");
-                TrySetProperty("osd-align-y", "bottom");
-                TrySetProperty("osd-border-size", "2.5");
-                TrySetProperty("osd-font-size", "36");
-                TrySetProperty("osd-margin-y", "24");
-                _mpv.Command("show-text", body, "86400000");
-            }
-            catch (MpvException)
-            {
-            }
         }
     }
 
@@ -1426,6 +1511,11 @@ public sealed class PlayerHost : IDisposable
             {
                 _mpv.SetOption("hwdec-codecs", "h264,hevc,av1,vp9,av01");
             }
+
+            _mpv.SetOption("target-colorspace-hint", "yes");
+            _mpv.SetOption("target-colorspace-hint-mode", "source");
+            _mpv.SetOption("hdr-compute-peak", "yes");
+            _mpv.SetOption("tone-mapping", "auto");
         }
 
         if (_options.WindowHandle != 0)

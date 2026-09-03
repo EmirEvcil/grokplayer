@@ -101,6 +101,9 @@ public sealed class SubtitleTests
         Assert.Equal("Hello", document.CueAt(TimeSpan.FromSeconds(2))?.Text);
         Assert.Equal("World\nline two", document.CueAt(TimeSpan.FromSeconds(5))?.Text);
         Assert.Equal("Hello", document.CueAt(TimeSpan.FromMilliseconds(200))?.Text);
+        Assert.Null(document.ActiveCueAt(TimeSpan.FromMilliseconds(200)));
+        Assert.Equal("Hello", document.ActiveCueAt(TimeSpan.FromSeconds(2))?.Text);
+        Assert.Null(document.ActiveCueAt(TimeSpan.FromSeconds(3.5)));
     }
 
     [Fact]

@@ -188,16 +188,21 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
     {
         get
         {
-            if (!Subtitles.Enabled || Subtitles.Applied is null)
-            {
-                return null;
-            }
-
-            var seconds = _isSeeking ? _seekValue : _player.Position.TotalSeconds;
-            var cue = Subtitles.Applied.Document.CueAt(
-                TimeSpan.FromSeconds(seconds) - TimeSpan.FromSeconds(Subtitles.DelaySeconds));
+            var cue = ActiveCaptionCue();
             return string.IsNullOrWhiteSpace(cue?.Text) ? null : cue.Text;
         }
+    }
+
+    private SrtCue? ActiveCaptionCue()
+    {
+        if (!Subtitles.Enabled || Subtitles.Applied is null)
+        {
+            return null;
+        }
+
+        var seconds = _isSeeking ? _seekValue : _player.Position.TotalSeconds;
+        return Subtitles.Applied.Document.ActiveCueAt(
+            TimeSpan.FromSeconds(seconds) - TimeSpan.FromSeconds(Subtitles.DelaySeconds));
     }
 
     public PlayerHost Player => _player;
@@ -675,6 +680,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         string? captionUrl = null;
         string? referer = null;
         string? soundtrack = null;
+        string? previewUrl = null;
         double? externalDuration = null;
         IReadOnlyList<ExternalCaption> captions = [];
         var protocolKind = StreamKind.Unknown;
@@ -704,6 +710,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             referer ??= external.Referer;
             soundtrack = external.Soundtrack;
             captions = external.Captions;
+            previewUrl = external.PreviewUrl;
             externalDuration = external.DurationSeconds;
             if (external.DurationSeconds is > 0)
             {
@@ -824,6 +831,11 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             if (!string.IsNullOrWhiteSpace(soundtrack))
             {
                 item.AudioUrl = soundtrack;
+            }
+
+            if (!string.IsNullOrWhiteSpace(previewUrl))
+            {
+                item.StoryboardSpec = "webvtt:" + previewUrl;
             }
 
             if (height > 0)
@@ -1603,31 +1615,68 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             }
         }
 
+        var overlay = ShouldOverlaySidecar();
+        string? attached = null;
         foreach (var play in paths)
         {
             if (_player.SetSubtitleFile(play))
             {
+                attached = play;
+                _captionFile = play;
+                break;
+            }
+        }
+
+        if (!overlay)
+        {
+            foreach (var play in paths)
+            {
+                if (_player.SetSubtitleFilter(play))
+                {
+                    _cueOverlay = false;
+                    _player.SetAssOverlay(null);
+                    _captionFile = play;
+                    return;
+                }
+            }
+
+            if (attached is not null)
+            {
                 _cueOverlay = false;
                 _player.ClearSubtitleFilter();
                 _player.SetAssOverlay(null);
-                _captionFile = play;
                 return;
             }
         }
 
-        foreach (var play in paths)
-        {
-            if (_player.SetSubtitleFilter(play))
-            {
-                _cueOverlay = false;
-                _player.SetAssOverlay(null);
-                _captionFile = play;
-                return;
-            }
-        }
-
+        // HLS sub-add/vf can attach without painting. The parsed sidecar
+        // overlay is the path that actually shows EN/TR on those streams.
+        _player.ClearSubtitleFilter();
+        _player.SetTrack("sub", null);
         _cueOverlay = true;
+        if (attached is not null)
+        {
+            _captionFile = attached;
+        }
+        else if (paths.Count > 0)
+        {
+            _captionFile = paths[0];
+        }
+
         PushCueOverlay();
+    }
+
+    private bool ShouldOverlaySidecar()
+    {
+        var path = _player.MediaPath ?? PlayingList.CurrentPath ?? "";
+        if (YouTubeCatalog.IsWatchUrl(path) ||
+            path.Contains("googlevideo.com", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("youtube.com", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return UrlSanitizer.IsUrl(path);
     }
 
     private static IEnumerable<string> SubPlayPaths(string file)
@@ -1766,6 +1815,9 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
 
     public void Dispose()
     {
+        // Invalidate caption/resolve callbacks before their UI continuation can
+        // touch the PlayerHost that owns this view model.
+        Interlocked.Increment(ref _openSerial);
         _player.StateChanged -= OnPlayerChanged;
         _player.TimeChanged -= OnTimeChanged;
         _player.DurationChanged -= OnPlayerChanged;
@@ -1792,6 +1844,33 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
     {
         _player.SetVideoPicture(Video.Brightness, Video.Contrast, Video.Saturation, Video.Hue);
         _player.SetVideoFilters(Video.Softer, Video.Sharpen, Video.Deblock);
+        ApplyVideoEnhance();
+    }
+
+    public void ApplyVideoEnhance()
+    {
+        var ctx = CurrentResizeContext();
+        var result = _player.SetVideoEnhance(
+            Video.SuperResolution,
+            VideoEnhanceSpec.Scale(ctx.SourceH, ctx.PlayerH),
+            Video.Hdr);
+        if (result.Ok)
+        {
+            return;
+        }
+
+        if (Video.SuperResolution)
+        {
+            Video.SetSuperResolution(false, notify: false);
+        }
+
+        if (Video.Hdr == HdrOutputMode.Rtx)
+        {
+            Video.SetHdr(HdrOutputMode.Native, notify: false);
+            _player.SetVideoEnhance(false, 1, HdrOutputMode.Native);
+        }
+
+        Note("RTX enhance failed");
     }
 
     public void ApplyScalingLive() => _player.SetScalingQuality(Scaling.Live);
@@ -1812,6 +1891,8 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         catch (Grok.Player.Core.Native.MpvException)
         {
         }
+
+        ApplyVideoEnhance();
     }
 
     public void RefreshPushedVideo()
@@ -1825,6 +1906,8 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         {
             ApplyResizeLive();
         }
+
+        ApplyVideoEnhance();
     }
 
     public void RefreshPushedResize()
@@ -1880,15 +1963,15 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
 
-        if (!StreamSubtitles.Enabled)
-        {
-            HideStreamSubtitles();
-            return;
-        }
-
         if (_subPicked)
         {
             ApplyCycledSubtitle();
+            return;
+        }
+
+        if (!StreamSubtitles.Enabled)
+        {
+            HideStreamSubtitles();
             return;
         }
 
@@ -1899,36 +1982,32 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         }
 
         var track = Subtitles.Applied;
-        if (track is not null)
+        if (track is null)
         {
-            if (TrackFitsCurrent(track) || Subtitles.CurrentMedia is null)
-            {
-                var serial = Volatile.Read(ref _openSerial);
-                if (_captionAppliedSerial == serial &&
-                    string.Equals(_captionFile, track.PlayPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    return;
-                }
-
-                AttachSidecarFiles(track.PlayPath, track.SourcePath);
-                _captionAppliedSerial = serial;
-            }
-            else
-            {
-                _player.SetSubtitleFile(null);
-                _captionAppliedSerial = 0;
-            }
-
+            _captionFile = null;
+            HideStreamSubtitles();
             _player.SetSubDelay(Subtitles.DelaySeconds);
             return;
         }
 
-        if (_sidecars.Count > 0 || !string.IsNullOrWhiteSpace(_captionFile))
+        if (TrackFitsCurrent(track) || Subtitles.CurrentMedia is null)
         {
-            return;
+            var serial = Volatile.Read(ref _openSerial);
+            if (_captionAppliedSerial == serial &&
+                string.Equals(_captionFile, track.PlayPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            AttachSidecarFiles(track.PlayPath, track.SourcePath);
+            _captionAppliedSerial = serial;
+        }
+        else
+        {
+            _player.SetSubtitleFile(null);
+            _captionAppliedSerial = 0;
         }
 
-        _player.SetSubtitleFile(null);
         _player.SetSubDelay(Subtitles.DelaySeconds);
     }
 
@@ -2235,6 +2314,11 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         OnPropertyChanged(nameof(VisiblePlaylist));
         OnPropertyChanged(nameof(CacheEndSeconds));
         OnPropertyChanged(nameof(OnScreenCaption));
+        if (_cueOverlay)
+        {
+            PushCueOverlay();
+        }
+
         RefreshTrackLabels();
     }
 
@@ -3127,14 +3211,16 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
 
-        var text = OnScreenCaption;
-        if (string.IsNullOrWhiteSpace(text))
+        var cue = ActiveCaptionCue();
+        if (cue is null || string.IsNullOrWhiteSpace(cue.Text))
         {
             _player.SetAssOverlay(null);
             return;
         }
 
-        _player.SetAssOverlay(text.Replace('\r', ' ').Trim());
+        // This text is generated by CaptionMarkup, so the ASS overrides are
+        // trusted and can carry browser edits (colour, bold, italic, etc.).
+        _player.SetStyledAssOverlay(CaptionMarkup.ToAssText(cue.Spans));
     }
 
     private void RememberStreamCaptionFile(string file, string? language, string? name)

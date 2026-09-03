@@ -10,6 +10,8 @@ public interface IPreviewAtlas : IDisposable
 
     void Prefetch(TimeSpan time);
 
+    void PrefetchCoverage() { }
+
     void Prioritize(TimeSpan time) { }
 
     bool RepresentsSameFrame(TimeSpan left, TimeSpan right) => false;

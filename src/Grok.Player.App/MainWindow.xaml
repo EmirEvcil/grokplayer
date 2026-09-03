@@ -125,8 +125,41 @@
                             Text="Subtitle browser integration" />
                     </MenuFlyoutSubItem>
                 </MenuFlyoutSubItem>
-                <MenuFlyoutSubItem Text="Video">
-                    <MenuFlyoutItem IsEnabled="False" Text="Coming soon" />
+                <MenuFlyoutSubItem x:Name="VideoMenu" Text="Video">
+                    <MenuFlyoutSubItem Text="Super resolution">
+                        <RadioMenuFlyoutItem
+                            x:Name="VsrOffItem"
+                            Click="SuperResolution_Click"
+                            GroupName="GrokVsr"
+                            Tag="off"
+                            Text="Off" />
+                        <RadioMenuFlyoutItem
+                            x:Name="VsrOnItem"
+                            Click="SuperResolution_Click"
+                            GroupName="GrokVsr"
+                            Tag="on"
+                            Text="RTX Video Super Resolution" />
+                    </MenuFlyoutSubItem>
+                    <MenuFlyoutSubItem Text="HDR">
+                        <RadioMenuFlyoutItem
+                            x:Name="HdrOffItem"
+                            Click="HdrMode_Click"
+                            GroupName="GrokHdr"
+                            Tag="Off"
+                            Text="Off" />
+                        <RadioMenuFlyoutItem
+                            x:Name="HdrNativeItem"
+                            Click="HdrMode_Click"
+                            GroupName="GrokHdr"
+                            Tag="Native"
+                            Text="Native HDR" />
+                        <RadioMenuFlyoutItem
+                            x:Name="HdrRtxItem"
+                            Click="HdrMode_Click"
+                            GroupName="GrokHdr"
+                            Tag="Rtx"
+                            Text="RTX HDR" />
+                    </MenuFlyoutSubItem>
                 </MenuFlyoutSubItem>
                 <MenuFlyoutSubItem x:Name="AudioMenu" Text="Audio">
                     <MenuFlyoutItem x:Name="AudioEmptyItem" IsEnabled="False" Text="No audio tracks" />

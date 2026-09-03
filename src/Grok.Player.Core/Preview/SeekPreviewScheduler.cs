@@ -5,14 +5,19 @@ public sealed class SeekPreviewScheduler : IDisposable
     private static readonly double[] NetworkHoverOffsets = [-2, 2, -5, 5, -10, 10, -20, 20];
     private static readonly double[] LocalHoverOffsets = [-1, 1, -3, 3, -6, 6];
     private readonly ISeekPreviewRenderer _renderer;
+    private ISeekPreviewRenderer? _coverage;
     private readonly double _bucketSeconds;
     private readonly int _atlasUpgradeDelayMs;
     private readonly Dictionary<int, CachedStill> _cache = [];
+    private readonly HashSet<int> _upgradeTried = [];
     private readonly LinkedList<int> _lru = [];
     private readonly Queue<TimeSpan> _prefetch = [];
+    private readonly Queue<TimeSpan> _dense = [];
     private readonly object _gate = new();
     private readonly AutoResetEvent _signal = new(false);
+    private readonly AutoResetEvent _coverageSignal = new(false);
     private readonly Thread _thread;
+    private Thread? _coverageThread;
     private string? _path;
     private string? _referer;
     private bool _network;
@@ -29,9 +34,13 @@ public sealed class SeekPreviewScheduler : IDisposable
     public SeekPreviewScheduler(
         ISeekPreviewRenderer renderer,
         double bucketSeconds = 0.2,
-        int atlasUpgradeDelayMs = 260)
+        int atlasUpgradeDelayMs = 260,
+        ISeekPreviewRenderer? coverageRenderer = null)
     {
         _renderer = renderer ?? throw new ArgumentNullException(nameof(renderer));
+        _coverage = coverageRenderer is not null && !ReferenceEquals(coverageRenderer, renderer)
+            ? coverageRenderer
+            : null;
         _bucketSeconds = Math.Max(0.05, bucketSeconds);
         _atlasUpgradeDelayMs = Math.Max(0, atlasUpgradeDelayMs);
         _thread = new Thread(Loop)
@@ -41,6 +50,44 @@ public sealed class SeekPreviewScheduler : IDisposable
             Priority = ThreadPriority.BelowNormal
         };
         _thread.Start();
+        if (_coverage is not null)
+        {
+            _coverageThread = new Thread(CoverageLoop)
+            {
+                IsBackground = true,
+                Name = "seek-preview-cover",
+                Priority = ThreadPriority.Lowest
+            };
+            _coverageThread.Start();
+        }
+    }
+
+    public void AttachCoverage(ISeekPreviewRenderer coverage)
+    {
+        ArgumentNullException.ThrowIfNull(coverage);
+        lock (_gate)
+        {
+            if (_coverage is not null || ReferenceEquals(coverage, _renderer))
+            {
+                if (!ReferenceEquals(coverage, _coverage) && !ReferenceEquals(coverage, _renderer))
+                {
+                    coverage.Dispose();
+                }
+
+                return;
+            }
+
+            _coverage = coverage;
+            _coverageThread = new Thread(CoverageLoop)
+            {
+                IsBackground = true,
+                Name = "seek-preview-cover",
+                Priority = ThreadPriority.Lowest
+            };
+            _coverageThread.Start();
+        }
+
+        _coverageSignal.Set();
     }
 
     public event Action<TimeSpan, string>? FrameReady;
@@ -50,6 +97,11 @@ public sealed class SeekPreviewScheduler : IDisposable
         lock (_gate)
         {
             _atlas = atlas;
+            if (atlas is not null)
+            {
+                _prefetch.Clear();
+                _dense.Clear();
+            }
         }
     }
 
@@ -70,6 +122,7 @@ public sealed class SeekPreviewScheduler : IDisposable
         }
 
         _signal.Set();
+        _coverageSignal.Set();
     }
 
     public void SetMedia(string? path, TimeSpan? duration, bool prefetch) =>
@@ -98,6 +151,7 @@ public sealed class SeekPreviewScheduler : IDisposable
             }
 
             if (prefetch &&
+                !LooksLikeYouTube(_path) &&
                 !_storyboardQueued &&
                 duration is { } length &&
                 length > TimeSpan.Zero &&
@@ -112,6 +166,7 @@ public sealed class SeekPreviewScheduler : IDisposable
         if (wake)
         {
             _signal.Set();
+            _coverageSignal.Set();
         }
     }
 
@@ -180,11 +235,16 @@ public sealed class SeekPreviewScheduler : IDisposable
     {
         lock (_gate)
         {
-            if (string.IsNullOrWhiteSpace(path) || _warmRequested) return;
+            if (string.IsNullOrWhiteSpace(path) || _warmRequested || _atlas is not null || LooksLikeYouTube(path))
+            {
+                return;
+            }
+
             _warmRequested = true;
             _warmPending = true;
         }
         _signal.Set();
+        _coverageSignal.Set();
     }
 
     private void Request(
@@ -211,10 +271,8 @@ public sealed class SeekPreviewScheduler : IDisposable
             if (_atlas is not null)
             {
                 _prefetch.Clear();
+                _dense.Clear();
                 _atlas.Prioritize(time);
-                var step = _atlas.IntervalSeconds;
-                foreach (var offset in new[] { -1, 1, -2, 2 })
-                    _prefetch.Enqueue(TimeSpan.FromSeconds(Math.Max(0, time.TotalSeconds + step * offset)));
             }
             else if (_network && includeNeighbors)
             {
@@ -225,6 +283,7 @@ public sealed class SeekPreviewScheduler : IDisposable
         }
 
         _signal.Set();
+        _coverageSignal.Set();
     }
 
     public void Request(TimeSpan time) => Request(_path ?? "", time);
@@ -233,10 +292,13 @@ public sealed class SeekPreviewScheduler : IDisposable
     {
         _running = false;
         _signal.Set();
+        _coverageSignal.Set();
         if (!_thread.Join(1500))
         {
             // Worker is in native capture; it will exit on next loop.
         }
+
+        _coverageThread?.Join(1500);
 
         lock (_gate)
         {
@@ -244,7 +306,13 @@ public sealed class SeekPreviewScheduler : IDisposable
         }
 
         _renderer.Dispose();
+        if (_coverage is not null)
+        {
+            _coverage.Dispose();
+        }
+
         _signal.Dispose();
+        _coverageSignal.Dispose();
     }
 
     private void Loop()
@@ -263,13 +331,16 @@ public sealed class SeekPreviewScheduler : IDisposable
                 lock (_gate)
                 {
                     path = _path;
-                    requested = TakeNext_NoLock(out behindLiveSeconds, out requestedUtc);
+                    requested = TakeNext_NoLock(
+                        out behindLiveSeconds,
+                        out requestedUtc,
+                        hoverOnly: _coverage is not null);
                     atlas = _atlas;
                     warm = requested < TimeSpan.Zero && _warmPending;
                     if (warm) _warmPending = false;
                 }
 
-                if (warm && !string.IsNullOrWhiteSpace(path))
+                if (warm && atlas is null && !LooksLikeYouTube(path) && !string.IsNullOrWhiteSpace(path))
                 {
                     try { PrepareRenderer(path); } catch { }
                     continue;
@@ -335,9 +406,14 @@ public sealed class SeekPreviewScheduler : IDisposable
                     {
                     }
 
+                    if (LooksLikeYouTube(path) && atlas is not null)
+                    {
+                        continue;
+                    }
+
                     if (atlasServed)
                     {
-                        if (!atlas.NeedsDecodedUpgrade)
+                        if (atlas is null || !atlas.NeedsDecodedUpgrade)
                         {
                             continue;
                         }
@@ -452,6 +528,25 @@ public sealed class SeekPreviewScheduler : IDisposable
                         continue;
                     }
 
+                    if (!hover &&
+                        decodedLow is not null &&
+                        atlas is null &&
+                        _renderer is IFastSeekPreviewRenderer)
+                    {
+                        var upgradedCoverage = _renderer.Capture(captureTime);
+                        if (upgradedCoverage is null)
+                        {
+                            continue;
+                        }
+
+                        if (!KeepAndPublish(path, atlas, requested, bucket, upgradedCoverage, high: true))
+                        {
+                            break;
+                        }
+
+                        continue;
+                    }
+
                     var image = hover || _renderer is not IFastSeekPreviewRenderer cheap
                         ? _renderer.Capture(captureTime)
                         : cheap.CaptureFast(captureTime);
@@ -468,6 +563,63 @@ public sealed class SeekPreviewScheduler : IDisposable
                 catch
                 {
                     // Preview must never take down playback.
+                }
+            }
+        }
+    }
+
+    private void CoverageLoop()
+    {
+        var renderer = _coverage;
+        if (renderer is null)
+        {
+            return;
+        }
+
+        while (_running)
+        {
+            _coverageSignal.WaitOne();
+            while (_running)
+            {
+                string? path;
+                TimeSpan requested;
+                lock (_gate)
+                {
+                    if (_atlas is not null || LooksLikeYouTube(_path))
+                    {
+                        path = null;
+                        requested = TimeSpan.FromSeconds(-1);
+                    }
+                    else
+                    {
+                        path = _path;
+                        requested = TakeCoverage_NoLock();
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(path) || requested < TimeSpan.Zero)
+                {
+                    break;
+                }
+
+                try
+                {
+                    PrepareRenderer(path, renderer);
+                    var image = renderer is IFastSeekPreviewRenderer fast
+                        ? fast.CaptureFast(requested)
+                        : renderer.Capture(requested);
+                    if (image is null)
+                    {
+                        continue;
+                    }
+
+                    if (!KeepAndPublish(path, atlas: null, requested, Bucket(requested), image, high: false))
+                    {
+                        break;
+                    }
+                }
+                catch
+                {
                 }
             }
         }
@@ -603,7 +755,10 @@ public sealed class SeekPreviewScheduler : IDisposable
         _lru.AddFirst(bucket);
     }
 
-    private TimeSpan TakeNext_NoLock(out double? behindLiveSeconds, out DateTime requestedUtc)
+    private TimeSpan TakeNext_NoLock(
+        out double? behindLiveSeconds,
+        out DateTime requestedUtc,
+        bool hoverOnly = false)
     {
         behindLiveSeconds = null;
         requestedUtc = default;
@@ -618,6 +773,16 @@ public sealed class SeekPreviewScheduler : IDisposable
             return hover;
         }
 
+        if (hoverOnly)
+        {
+            return TimeSpan.FromSeconds(-1);
+        }
+
+        return TakeCoverage_NoLock();
+    }
+
+    private TimeSpan TakeCoverage_NoLock()
+    {
         while (_prefetch.Count > 0)
         {
             var next = _prefetch.Dequeue();
@@ -627,10 +792,60 @@ public sealed class SeekPreviewScheduler : IDisposable
             }
         }
 
+        while (_dense.Count > 0)
+        {
+            var next = _dense.Dequeue();
+            if (!_cache.ContainsKey(Bucket(next)))
+            {
+                return next;
+            }
+        }
+
+        if (_coverage is null &&
+            _atlas is null &&
+            _hover >= TimeSpan.Zero &&
+            _renderer is IFastSeekPreviewRenderer)
+        {
+            return NextUpgrade_NoLock();
+        }
+
         return TimeSpan.FromSeconds(-1);
     }
 
-    private void PrepareRenderer(string path)
+    private TimeSpan NextUpgrade_NoLock()
+    {
+        var target = _hover.TotalSeconds;
+        var best = TimeSpan.FromSeconds(-1);
+        var bestBucket = int.MinValue;
+        var bestScore = double.MaxValue;
+        foreach (var (bucket, still) in _cache)
+        {
+            if (still.High || _upgradeTried.Contains(bucket))
+            {
+                continue;
+            }
+
+            var at = (bucket * ActiveBucket) + (ActiveBucket * 0.5);
+            var score = Math.Abs(at - target);
+            if (score < bestScore)
+            {
+                bestScore = score;
+                bestBucket = bucket;
+                best = TimeSpan.FromSeconds(at);
+            }
+        }
+
+        if (bestBucket != int.MinValue)
+        {
+            _upgradeTried.Add(bestBucket);
+        }
+
+        return best;
+    }
+
+    private void PrepareRenderer(string path) => PrepareRenderer(path, _renderer);
+
+    private void PrepareRenderer(string path, ISeekPreviewRenderer renderer)
     {
         string? referer;
         lock (_gate)
@@ -638,13 +853,13 @@ public sealed class SeekPreviewScheduler : IDisposable
             referer = _referer;
         }
 
-        if (_renderer is INetworkSeekPreviewRenderer networked)
+        if (renderer is INetworkSeekPreviewRenderer networked)
         {
             networked.Prepare(path, referer);
             return;
         }
 
-        _renderer.Prepare(path);
+        renderer.Prepare(path);
     }
 
     private void EnqueueAround_NoLock(TimeSpan center)
@@ -711,13 +926,26 @@ public sealed class SeekPreviewScheduler : IDisposable
             count = Math.Max(2, (int)Math.Ceiling(span));
         }
 
+        var coarse = _network ? Math.Min(16, count) : count;
+        var stride = Math.Max(1, count / coarse);
         var step = span / count;
+        var seen = new HashSet<int>();
         for (var i = 0; i < count; i++)
         {
             var time = TimeSpan.FromSeconds(Math.Clamp(from + (i + 0.5) * step, from, to));
-            if (!_cache.ContainsKey(Bucket(time)))
+            var bucket = Bucket(time);
+            if (_cache.ContainsKey(bucket) || !seen.Add(bucket))
+            {
+                continue;
+            }
+
+            if (i % stride == 0)
             {
                 _prefetch.Enqueue(time);
+            }
+            else
+            {
+                _dense.Enqueue(time);
             }
         }
     }
@@ -768,8 +996,10 @@ public sealed class SeekPreviewScheduler : IDisposable
         }
 
         _cache.Clear();
+        _upgradeTried.Clear();
         _lru.Clear();
         _prefetch.Clear();
+        _dense.Clear();
         _storyboardQueued = false;
     }
 
@@ -791,6 +1021,12 @@ public sealed class SeekPreviewScheduler : IDisposable
 
     private int Bucket(TimeSpan time) =>
         (int)Math.Floor(Math.Max(0, time.TotalSeconds) / ActiveBucket);
+
+    private static bool LooksLikeYouTube(string? path) =>
+        path is not null &&
+        (path.Contains("googlevideo.com", StringComparison.OrdinalIgnoreCase) ||
+         path.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
+         path.Contains("youtu.be", StringComparison.OrdinalIgnoreCase));
 
     private readonly record struct CachedStill(string Path, bool High);
 }

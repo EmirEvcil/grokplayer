@@ -32,6 +32,8 @@ public static class ActionFeedback
 
     public static string VideoFilter(string name, bool on) => on ? $"{name} on" : $"{name} off";
 
+    public static string HdrMode(string label) => $"HDR {label}";
+
     public static string CapturedFrame() => "Captured frame";
 
     public static string SubtitleLoaded(string name) =>

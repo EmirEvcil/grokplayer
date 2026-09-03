@@ -14,8 +14,12 @@ public sealed class FakeMpvNative : IMpvNative
     public bool Initialized { get; private set; }
     public bool IsTerminated { get; private set; }
     public bool ThrowOnCommand { get; set; }
+    public string? FailIfCommandContains { get; set; }
+    public int FailVfPreRemaining { get; set; }
     public bool AutoLoad { get; set; } = true;
     public bool SeekReachesTarget { get; set; } = true;
+    public bool ThrowOnTimePos { get; set; }
+    public bool WriteBlackScreenshots { get; set; }
     public double AutoDurationSeconds { get; set; } = 120;
     public string AutoHwdec { get; set; } = "d3d11va";
     public object AutoVid { get; set; } = 1L;
@@ -58,8 +62,16 @@ public sealed class FakeMpvNative : IMpvNative
             throw new MpvException(-3, "command");
         }
 
-        if (ThrowOnCommand)
+        if (ThrowOnCommand ||
+            (!string.IsNullOrWhiteSpace(FailIfCommandContains) &&
+             args.Any(arg => arg.Contains(FailIfCommandContains, StringComparison.Ordinal))) ||
+            (FailVfPreRemaining > 0 && args.Length >= 2 && args[0] == "vf" && args[1] == "pre"))
         {
+            if (FailVfPreRemaining > 0 && args.Length >= 2 && args[0] == "vf" && args[1] == "pre")
+            {
+                FailVfPreRemaining--;
+            }
+
             throw new MpvException(-12, args.ElementAtOrDefault(0) ?? "command");
         }
 
@@ -75,6 +87,10 @@ public sealed class FakeMpvNative : IMpvNative
             var index = (int)(GetPropertyLong("track-list/count") ?? 0);
             SeedTrack(index, "sub", index + 1, "", Path.GetFileName(args[1]), true, external: true);
             Seed("track-list/" + index + "/external-filename", args[1]);
+        }
+        else if (args[0] == "sub-remove")
+        {
+            HandleSubRemove();
         }
         else if (args[0] == "stop")
         {
@@ -117,8 +133,15 @@ public sealed class FakeMpvNative : IMpvNative
     public bool? GetPropertyFlag(string name) =>
         _properties.TryGetValue(name, out var value) && value is bool flag ? flag : null;
 
-    public double? GetPropertyDouble(string name) =>
-        _properties.TryGetValue(name, out var value) && value is double number ? number : null;
+    public double? GetPropertyDouble(string name)
+    {
+        if (ThrowOnTimePos && name == "time-pos")
+        {
+            throw new MpvException(-3, name);
+        }
+
+        return _properties.TryGetValue(name, out var value) && value is double number ? number : null;
+    }
 
     public long? GetPropertyLong(string name) =>
         _properties.TryGetValue(name, out var value) && value is long number ? number : null;
@@ -221,12 +244,65 @@ public sealed class FakeMpvNative : IMpvNative
             Directory.CreateDirectory(dir);
         }
 
-        var png = Convert.FromBase64String(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==");
-        var payload = new byte[Math.Max(4096, png.Length)];
-        Buffer.BlockCopy(png, 0, payload, 0, png.Length);
+        var source = WriteBlackScreenshots
+            ? Convert.FromBase64String(BlackJpeg)
+            : Convert.FromBase64String(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==");
+        var payload = new byte[Math.Max(4096, source.Length)];
+        Buffer.BlockCopy(source, 0, payload, 0, source.Length);
         File.WriteAllBytes(path, payload);
         Screenshots.Add(path);
+    }
+
+    private void HandleSubRemove()
+    {
+        var count = (int)(GetPropertyLong("track-list/count") ?? 0);
+        for (var i = count - 1; i >= 0; i--)
+        {
+            var prefix = "track-list/" + i + "/";
+            if (!string.Equals(GetPropertyString(prefix + "type"), "sub", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (GetPropertyFlag(prefix + "external") != true)
+            {
+                continue;
+            }
+
+            for (var j = i + 1; j < count; j++)
+            {
+                CopyTrack(j, j - 1);
+            }
+
+            ClearTrack(count - 1);
+            Seed("track-list/count", (long)(count - 1));
+            return;
+        }
+    }
+
+    private void CopyTrack(int from, int to)
+    {
+        foreach (var field in new[] { "type", "id", "lang", "title", "selected", "external", "external-filename" })
+        {
+            var value = _properties.TryGetValue("track-list/" + from + "/" + field, out var stored) ? stored : null;
+            if (value is null)
+            {
+                _properties.Remove("track-list/" + to + "/" + field);
+            }
+            else
+            {
+                _properties["track-list/" + to + "/" + field] = value;
+            }
+        }
+    }
+
+    private void ClearTrack(int index)
+    {
+        foreach (var field in new[] { "type", "id", "lang", "title", "selected", "external", "external-filename" })
+        {
+            _properties.Remove("track-list/" + index + "/" + field);
+        }
     }
 
     private void HandleStop()
@@ -314,4 +390,7 @@ public sealed class FakeMpvNative : IMpvNative
             throw new ObjectDisposedException(nameof(FakeMpvNative));
         }
     }
+
+    private const string BlackJpeg =
+        "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAAgACADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD4yooooAKKKKACiiigAooooA//2Q==";
 }

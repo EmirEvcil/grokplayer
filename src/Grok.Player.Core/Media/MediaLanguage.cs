@@ -134,7 +134,8 @@ public static class MediaLanguage
         }
 
         if (lower.Contains("english", StringComparison.Ordinal) ||
-            lower.Contains("ingiliz", StringComparison.Ordinal))
+            lower.Contains("ingiliz", StringComparison.Ordinal) ||
+            lower.Contains("ngiliz", StringComparison.Ordinal))
         {
             return "en";
         }
@@ -296,7 +297,8 @@ public static class MediaLanguage
             "tr" => lower.Contains("türk", StringComparison.Ordinal) ||
                     lower.Contains("turk", StringComparison.Ordinal),
             "en" => lower.Contains("english", StringComparison.Ordinal) ||
-                    lower.Contains("ingiliz", StringComparison.Ordinal),
+                    lower.Contains("ingiliz", StringComparison.Ordinal) ||
+                    lower.Contains("ngiliz", StringComparison.Ordinal),
             "ar" => lower.Contains("arab", StringComparison.Ordinal) ||
                     lower.Contains("arap", StringComparison.Ordinal) ||
                     lower.Contains("عربي", StringComparison.Ordinal),

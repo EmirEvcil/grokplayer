@@ -114,6 +114,8 @@ assert.equal(
 );
 
 context.rememberNetwork(9, vod, genericPage);
+context.rememberNetwork(9, "https://cdn.example/preview/thumbnails.vtt", genericPage);
+assert.equal(context.recentPreview(9, genericPage), "https://cdn.example/preview/thumbnails.vtt");
 context.rememberNetwork(
   11,
   extensionless,
@@ -212,5 +214,25 @@ assert.equal(
   "en|https://cdn.example/subs/english|English",
   "labeled sidecar URLs transfer even without a .vtt suffix"
 );
+
+context.window = {
+  FSP: {
+    tracks: [
+      { file: "https://cdn.example/subtitle/tur.vtt", label: "Türkçe", lang: "tur", kind: "captions" },
+      { file: "https://cdn.example/subtitle/eng.vtt", label: "English", lang: "eng", kind: "captions" },
+      { file: "https://cdn.example/preview/thumbnails.vtt", kind: "thumbnails" }
+    ]
+  }
+};
+context.document = { querySelectorAll() { return []; } };
+const fastPlay = context.readPagePlayerTracks();
+assert.deepEqual(Array.from(fastPlay.captions, item => item.lang), ["tr", "en"]);
+assert.equal(fastPlay.previewUrl, "https://cdn.example/preview/thumbnails.vtt");
+const withPreview = new URL(context.protocol({
+  url: "https://cdn.example/master.m3u8",
+  kind: "vod",
+  previewUrl: fastPlay.previewUrl
+}, true));
+assert.equal(withPreview.searchParams.get("preview"), fastPlay.previewUrl);
 
 console.log("background.test.mjs ok");

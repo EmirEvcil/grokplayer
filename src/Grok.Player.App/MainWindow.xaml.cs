@@ -41,7 +41,8 @@ public sealed partial class MainWindow : Window
     private readonly ActionOsd _actionOsd = new();
     private SeekPreviewController? _previewUi;
     private SeekPreviewScheduler? _previewWork;
-    private StoryboardAtlas? _previewAtlas;
+    private bool _previewCoverageAttached;
+    private IPreviewAtlas? _previewAtlas;
     private string? _previewAtlasSpec;
     private string? _previewMediaKey;
     private int _previewGeneration;
@@ -323,13 +324,24 @@ public sealed partial class MainWindow : Window
 
         BindPreviewAtlas();
         _previewUi?.SetMedia(path, _player.Duration);
+        var decoderVod = !string.IsNullOrWhiteSpace(path) &&
+                         !_view.IsLive &&
+                         _previewAtlas is null &&
+                         !YouTubeCatalog.IsWatchUrl(_view.VisiblePlaylist.CurrentPath) &&
+                         !YouTubeCatalog.TryReadVideoId(_view.VisiblePlaylist.CurrentPath ?? path, out _);
+        if (decoderVod && !_previewCoverageAttached && _previewWork is not null)
+        {
+            _previewCoverageAttached = true;
+            _previewWork.AttachCoverage(SeekPreviewEngine.Create());
+        }
+
         _previewWork?.SetMedia(
             path,
             _player.Duration,
-            prefetch: !_view.IsLive && _previewAtlas is null,
+            prefetch: decoderVod,
             referer: _view.PlayingReferer);
         _previewWork?.SetAtlas(_previewAtlas);
-        if (!string.IsNullOrWhiteSpace(path) && !_view.IsLive)
+        if (decoderVod)
         {
             _previewWork?.Warm(path);
         }
@@ -1143,6 +1155,7 @@ public sealed partial class MainWindow : Window
         RebuildPlayingSubtitleMenu();
         RebuildSubtitleMenu();
         SyncStreamSubtitleMenu();
+        SyncVideoEnhanceMenu();
         BrandChevron.Glyph = "\uE70E";
         AppMenuPlaylistItem.IsChecked = _view.PlaylistVisible;
         AppMenuControlPanelItem.IsChecked = IsControlPanelOpen;
@@ -1351,6 +1364,53 @@ public sealed partial class MainWindow : Window
         _subtitleBrowser.Closed += (_, _) => _subtitleBrowser = null;
         var here = AppWindow.Position;
         _subtitleBrowser.AppWindow.Move(new PointInt32(here.X + 56, here.Y + 72));
+    }
+
+    private void SyncVideoEnhanceMenu()
+    {
+        if (VsrOffItem is not null)
+        {
+            VsrOffItem.IsChecked = !_view.Video.SuperResolution;
+        }
+
+        if (VsrOnItem is not null)
+        {
+            VsrOnItem.IsChecked = _view.Video.SuperResolution;
+        }
+
+        if (HdrOffItem is not null)
+        {
+            HdrOffItem.IsChecked = _view.Video.Hdr == HdrOutputMode.Off;
+        }
+
+        if (HdrNativeItem is not null)
+        {
+            HdrNativeItem.IsChecked = _view.Video.Hdr == HdrOutputMode.Native;
+        }
+
+        if (HdrRtxItem is not null)
+        {
+            HdrRtxItem.IsChecked = _view.Video.Hdr == HdrOutputMode.Rtx;
+        }
+    }
+
+    private void SuperResolution_Click(object sender, RoutedEventArgs e)
+    {
+        var on = sender is RadioMenuFlyoutItem { Tag: "on" };
+        _view.Video.SetSuperResolution(on);
+        ShowActionFeedback(ActionFeedback.VideoFilter("Super resolution", on));
+    }
+
+    private void HdrMode_Click(object sender, RoutedEventArgs e)
+    {
+        var tag = (sender as RadioMenuFlyoutItem)?.Tag as string;
+        var mode = tag == "Off"
+            ? HdrOutputMode.Off
+            : tag == "Rtx"
+                ? HdrOutputMode.Rtx
+                : HdrOutputMode.Native;
+        _view.Video.SetHdr(mode);
+        ShowActionFeedback(ActionFeedback.HdrMode(VideoEnhanceSpec.Label(mode)));
     }
 
     private void AppMenuPlaylist_Click(object sender, RoutedEventArgs e)
@@ -2867,13 +2927,24 @@ public sealed partial class MainWindow : Window
 
         BindPreviewAtlas();
         _previewUi?.SetMedia(path, window);
+        var decoderVod = !string.IsNullOrWhiteSpace(path) &&
+                         !_view.IsLive &&
+                         _previewAtlas is null &&
+                         !YouTubeCatalog.IsWatchUrl(_view.VisiblePlaylist.CurrentPath) &&
+                         !YouTubeCatalog.TryReadVideoId(_view.VisiblePlaylist.CurrentPath ?? path, out _);
+        if (decoderVod && !_previewCoverageAttached && _previewWork is not null)
+        {
+            _previewCoverageAttached = true;
+            _previewWork.AttachCoverage(SeekPreviewEngine.Create());
+        }
+
         _previewWork?.SetMedia(
             path,
             window,
-            prefetch: !_view.IsLive && _previewAtlas is null,
+            prefetch: decoderVod,
             referer: _view.PlayingReferer);
         _previewWork?.SetAtlas(_previewAtlas);
-        if (!string.IsNullOrWhiteSpace(path) && !_view.IsLive)
+        if (decoderVod)
         {
             _previewWork?.Warm(path);
         }
@@ -2912,12 +2983,6 @@ public sealed partial class MainWindow : Window
     private void BindPreviewAtlas()
     {
         var spec = _view.IsLive ? null : _view.StoryboardSpec;
-        var page = _view.VisiblePlaylist.CurrentPath ?? _player.MediaPath;
-        if (!YouTubeCatalog.IsWatchUrl(page) &&
-            !YouTubeCatalog.TryReadVideoId(page, out _))
-        {
-            spec = null;
-        }
         var key = PreviewMediaKey() + "|" + (spec ?? "");
         if (string.Equals(key, _previewAtlasSpec, StringComparison.Ordinal))
         {
@@ -2925,7 +2990,11 @@ public sealed partial class MainWindow : Window
         }
 
         _previewAtlas?.Dispose();
-        _previewAtlas = string.IsNullOrWhiteSpace(spec) ? null : StoryboardAtlas.TryCreate(spec, PreviewWindow());
+        _previewAtlas = string.IsNullOrWhiteSpace(spec)
+            ? null
+            : spec.StartsWith("webvtt:", StringComparison.OrdinalIgnoreCase)
+                ? WebVttPreviewAtlas.TryCreate(spec[7..], _view.PlayingReferer)
+                : StoryboardAtlas.TryCreate(spec, PreviewWindow());
         _previewAtlasSpec = key;
         _previewWork?.SetAtlas(_previewAtlas);
         if (_previewAtlas is { } atlas)

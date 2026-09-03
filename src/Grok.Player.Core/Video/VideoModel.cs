@@ -9,6 +9,8 @@ public sealed class VideoModel
     private bool _softer;
     private bool _sharpen;
     private bool _deblock;
+    private bool _superResolution;
+    private HdrOutputMode _hdr = HdrOutputMode.Native;
 
     public event Action? Changed;
 
@@ -25,6 +27,10 @@ public sealed class VideoModel
     public bool Sharpen => _sharpen;
 
     public bool Deblock => _deblock;
+
+    public bool SuperResolution => _superResolution;
+
+    public HdrOutputMode Hdr => _hdr;
 
     public void SetBrightness(double value, bool notify = true) =>
         SetPicture(ref _brightness, value, notify);
@@ -52,6 +58,23 @@ public sealed class VideoModel
 
     public void SetDeblock(bool value) => SetFilter(ref _deblock, value);
 
+    public void SetSuperResolution(bool value, bool notify = true) =>
+        SetFilter(ref _superResolution, value, notify);
+
+    public void SetHdr(HdrOutputMode value, bool notify = true)
+    {
+        if (_hdr == value)
+        {
+            return;
+        }
+
+        _hdr = value;
+        if (notify)
+        {
+            Changed?.Invoke();
+        }
+    }
+
     public string FilterGraph => VideoFilterGraph.Build(_softer, _sharpen, _deblock);
 
     private void SetPicture(ref double field, double value, bool notify)
@@ -69,7 +92,7 @@ public sealed class VideoModel
         }
     }
 
-    private void SetFilter(ref bool field, bool value)
+    private void SetFilter(ref bool field, bool value, bool notify = true)
     {
         if (field == value)
         {
@@ -77,6 +100,9 @@ public sealed class VideoModel
         }
 
         field = value;
-        Changed?.Invoke();
+        if (notify)
+        {
+            Changed?.Invoke();
+        }
     }
 }

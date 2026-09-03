@@ -39,6 +39,7 @@ public sealed class ActionFeedbackTests
         Assert.Equal("Brightness 50", ActionFeedback.VideoPicture("Brightness", 50.4));
         Assert.Equal("Color 0", ActionFeedback.VideoPicture("Color", -3));
         Assert.Equal("Softer on", ActionFeedback.VideoFilter("Softer", true));
+        Assert.Equal("HDR Native", ActionFeedback.HdrMode("Native"));
         Assert.Equal("Sharpen off", ActionFeedback.VideoFilter("Sharpen", false));
         Assert.Equal("Captured frame", ActionFeedback.CapturedFrame());
         Assert.Equal("Subtitle film.srt", ActionFeedback.SubtitleLoaded("film.srt"));

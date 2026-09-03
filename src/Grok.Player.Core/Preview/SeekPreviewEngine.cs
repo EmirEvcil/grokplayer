@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using Grok.Player.Core.Media;
 using Grok.Player.Core.Native;
+using SkiaSharp;
 
 namespace Grok.Player.Core.Preview;
 
@@ -16,12 +17,14 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer, IExactSeekPreviewR
     private string? _lastStillHash;
     private TimeSpan _lastStillTime = TimeSpan.FromSeconds(-1);
     private bool _ready;
+    private bool _firstNetworkPaint = true;
+    private string? _paintedDump;
 
     public SeekPreviewEngine(IMpvNative mpv, bool ownsNative = true)
     {
         _mpv = mpv ?? throw new ArgumentNullException(nameof(mpv));
         _ownsNative = ownsNative;
-        _imageDump = Path.Combine(Path.GetTempPath(), "grok-player-preview-vo");
+        _imageDump = Path.Combine(Path.GetTempPath(), "grok-player-preview-vo-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_imageDump);
         ApplyOptions();
         _mpv.Initialize();
@@ -74,6 +77,7 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer, IExactSeekPreviewR
         _path = path;
         _referer = referer;
         _ready = false;
+        _firstNetworkPaint = true;
         _lastStillHash = null;
         _lastStillTime = TimeSpan.FromSeconds(-1);
         ApplyNetworkIdentity(path, referer);
@@ -84,6 +88,12 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer, IExactSeekPreviewR
         _mpv.SetPropertyFlag("pause", true);
         var wait = youtube ? 3.5 : path.Contains("://", StringComparison.Ordinal) ? 12.0 : 0.8;
         _ready = WaitForFile(wait);
+        if (_ready && !youtube && path.Contains("://", StringComparison.Ordinal))
+        {
+            try { _mpv.SetPropertyFlag("pause", false); } catch (MpvException) { }
+            Settle(0.7);
+            try { _mpv.SetPropertyFlag("pause", true); } catch (MpvException) { }
+        }
     }
 
     public string? CaptureFast(TimeSpan time)
@@ -94,25 +104,10 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer, IExactSeekPreviewR
             return null;
         }
 
-        var seconds = Math.Max(0, time.TotalSeconds).ToString("0.###", CultureInfo.InvariantCulture);
         ApplyTier(high: false);
-        DrainPendingEvents();
-        if (!TrySeek(seconds, "absolute+keyframes") && !TrySeek(seconds, "absolute"))
+        if (!SeekAndPaint(time, exact: false, high: false))
         {
             return null;
-        }
-
-        if (_path is not null && _path.Contains("://", StringComparison.Ordinal))
-        {
-            if (!WaitForSeekLanding(time, SeekPreviewDisplay.KeyframeToleranceSeconds, 3.0) ||
-                !SeekLanded(time, SeekPreviewDisplay.KeyframeToleranceSeconds))
-            {
-                return null;
-            }
-        }
-        else
-        {
-            Settle(0.05);
         }
 
         return TakeStill(time, minBytes: 800);
@@ -133,56 +128,97 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer, IExactSeekPreviewR
             return null;
         }
 
-        var seconds = Math.Max(0, time.TotalSeconds).ToString("0.###", CultureInfo.InvariantCulture);
-        var network = _path.Contains("://", StringComparison.Ordinal);
-        var youtube = LooksLikeYouTube(_path);
         ApplyTier(high: true);
-        DrainPendingEvents();
-        var alreadyLanded = !exact && SeekLanded(time, 2.5);
-        if (exact
-            ? !TrySeek(seconds, "absolute+exact")
-            : !alreadyLanded &&
-              !TrySeek(seconds, network ? "absolute+keyframes" : "absolute") &&
-              !TrySeek(seconds, "absolute"))
+        if (!SeekAndPaint(time, exact, high: true))
         {
             return null;
-        }
-
-        if (exact)
-        {
-            if (!WaitForSeekLanding(time, 0.35, 1.0) || !SeekLanded(time, 0.35))
-            {
-                return null;
-            }
-        }
-        else if (youtube)
-        {
-            if (!WaitForSeekLanding(time, 2.5, alreadyLanded ? 0.8 : 3.0) || !SeekLanded(time, 2.5))
-            {
-                return null;
-            }
-        }
-        else if (network)
-        {
-            if (!WaitForSeekLanding(
-                    time,
-                    SeekPreviewDisplay.KeyframeToleranceSeconds,
-                    alreadyLanded ? 0.6 : 3.0) ||
-                !SeekLanded(time, SeekPreviewDisplay.KeyframeToleranceSeconds))
-            {
-                return null;
-            }
-        }
-        else
-        {
-            WaitForSeek();
         }
 
         return TakeStill(time, minBytes: 2400);
     }
 
+    private bool SeekAndPaint(TimeSpan time, bool exact, bool high)
+    {
+        var seconds = Math.Max(0, time.TotalSeconds).ToString("0.###", CultureInfo.InvariantCulture);
+        var network = _path is not null && _path.Contains("://", StringComparison.Ordinal);
+        var youtube = _path is not null && LooksLikeYouTube(_path);
+        var haveStill = SeekPreviewDisplay.Fits(
+            time,
+            _lastStillTime,
+            SeekPreviewDisplay.DecoderDeltaSeconds);
+        var alreadyThere = !exact &&
+                           haveStill &&
+                           SeekLanded(time, SeekPreviewDisplay.KeyframeToleranceSeconds);
+
+        DrainPendingEvents();
+        SweepImageDump();
+        var beforeDump = DumpSnapshot();
+        _paintedDump = null;
+        if (exact)
+        {
+            if (!TrySeek(seconds, "absolute+exact"))
+            {
+                return false;
+            }
+        }
+        else if (!alreadyThere &&
+                 !TrySeek(seconds, network ? "absolute+keyframes" : "absolute") &&
+                 !TrySeek(seconds, "absolute"))
+        {
+            return false;
+        }
+
+        try
+        {
+            _mpv.SetPropertyFlag("pause", false);
+        }
+        catch (MpvException)
+        {
+        }
+
+        var tolerance = exact ? 0.35
+            : youtube ? 2.5
+            : network ? SeekPreviewDisplay.KeyframeToleranceSeconds
+            : 1.0;
+        var jump = Math.Abs(time.TotalSeconds - Math.Max(0, _lastStillTime.TotalSeconds));
+        var timeout = exact ? 1.0
+            : alreadyThere ? 0.8
+            : !network ? 0.8
+            : _firstNetworkPaint ? 6.0
+            : jump > 20 ? 3.2
+            : high ? 2.2
+            : 1.6;
+        var painted = WaitForPaint(time, tolerance, timeout, beforeDump, requireRestart: !alreadyThere);
+
+        try { _mpv.SetPropertyFlag("pause", true); } catch (MpvException) { }
+        DrainPendingEvents();
+        if (!painted)
+        {
+            return false;
+        }
+
+        return !network || SeekLanded(time, exact ? 0.35 : SeekPreviewDisplay.KeyframeToleranceSeconds);
+    }
+
     private string? TakeStill(TimeSpan requested, int minBytes)
     {
+        if (_paintedDump is not null &&
+            Grok.Player.Core.Player.LivePlayback.IsUsableStill(_paintedDump) &&
+            !LooksBlank(_paintedDump, minBytes))
+        {
+            var kept = Path.Combine(Path.GetTempPath(), $"grok-player-seek-{Guid.NewGuid():N}.jpg");
+            try
+            {
+                File.Copy(_paintedDump, kept, overwrite: true);
+                _paintedDump = null;
+                return KeepStill(requested, kept);
+            }
+            catch (IOException)
+            {
+                TryDelete(kept);
+            }
+        }
+
         var file = Path.Combine(Path.GetTempPath(), $"grok-player-seek-{Guid.NewGuid():N}.jpg");
         try
         {
@@ -193,16 +229,12 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer, IExactSeekPreviewR
             return null;
         }
 
-        if (!Grok.Player.Core.Player.LivePlayback.IsUsableStill(file) || LooksBlank(file, minBytes))
-        {
-            TryDelete(file);
-            _lastFile = null;
-            return null;
-        }
+        return KeepStill(requested, file, minBytes);
+    }
 
-        if (_path is not null &&
-            _path.Contains("://", StringComparison.Ordinal) &&
-            !SeekLanded(requested, SeekPreviewDisplay.KeyframeToleranceSeconds))
+    private string? KeepStill(TimeSpan requested, string file, int minBytes = 800)
+    {
+        if (!Grok.Player.Core.Player.LivePlayback.IsUsableStill(file) || LooksBlank(file, minBytes))
         {
             TryDelete(file);
             _lastFile = null;
@@ -230,6 +262,11 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer, IExactSeekPreviewR
 
         SweepImageDump();
         _lastFile = file;
+        if (network)
+        {
+            _firstNetworkPaint = false;
+        }
+
         return _lastFile;
     }
 
@@ -237,6 +274,7 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer, IExactSeekPreviewR
     {
         _path = null;
         _ready = false;
+        _firstNetworkPaint = true;
         _lastStillHash = null;
         _lastStillTime = TimeSpan.FromSeconds(-1);
         try
@@ -319,7 +357,7 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer, IExactSeekPreviewR
     {
         if (high)
         {
-            TrySet("vf", "scale=512:-2");
+            TrySet("vf", "scale=320:-2");
             TrySet("screenshot-jpeg-quality", "85");
             return;
         }
@@ -372,14 +410,19 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer, IExactSeekPreviewR
         }
         catch (MpvException)
         {
-            return true;
+            return false;
         }
     }
 
-    private bool WaitForSeekLanding(TimeSpan requested, double toleranceSeconds, double timeoutSeconds)
+    private bool WaitForPaint(
+        TimeSpan requested,
+        double toleranceSeconds,
+        double timeoutSeconds,
+        HashSet<string> beforeDump,
+        bool requireRestart)
     {
         var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
-        var frameRestarted = false;
+        var frameRestarted = !requireRestart;
         while (DateTime.UtcNow < deadline)
         {
             var ev = _mpv.WaitEvent(0.02);
@@ -388,16 +431,88 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer, IExactSeekPreviewR
                 frameRestarted = true;
             }
 
-            // time-pos can update before the decoder replaces its previous
-            // video frame. Waiting for PlaybackRestart prevents a screenshot
-            // from carrying an older hover image under the new timestamp.
-            if (frameRestarted && SeekLanded(requested, toleranceSeconds))
+            var dumped = NewestDump(beforeDump);
+            if (dumped is not null)
             {
-                Settle(0.03);
-                return SeekLanded(requested, toleranceSeconds);
+                _paintedDump = dumped;
+                return true;
             }
         }
-        return false;
+
+        var last = NewestDump(beforeDump);
+        if (last is not null)
+        {
+            _paintedDump = last;
+            return true;
+        }
+
+        return frameRestarted && SeekLanded(requested, toleranceSeconds);
+    }
+
+    private HashSet<string> DumpSnapshot()
+    {
+        try
+        {
+            if (!Directory.Exists(_imageDump))
+            {
+                return [];
+            }
+
+            return Directory.EnumerateFiles(_imageDump, "*.jpg").ToHashSet(StringComparer.OrdinalIgnoreCase);
+        }
+        catch (IOException)
+        {
+            return [];
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return [];
+        }
+    }
+
+    private string? NewestDump(HashSet<string> before)
+    {
+        try
+        {
+            if (!Directory.Exists(_imageDump))
+            {
+                return null;
+            }
+
+            string? best = null;
+            var bestWrite = DateTime.MinValue;
+            foreach (var file in Directory.EnumerateFiles(_imageDump, "*.jpg"))
+            {
+                if (before.Contains(file))
+                {
+                    continue;
+                }
+
+                var info = new FileInfo(file);
+                if (info.Length < 800 || info.LastWriteTimeUtc < bestWrite)
+                {
+                    continue;
+                }
+
+                if (LooksBlank(file, 800))
+                {
+                    continue;
+                }
+
+                best = file;
+                bestWrite = info.LastWriteTimeUtc;
+            }
+
+            return best;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     private void DrainPendingEvents()
@@ -475,7 +590,30 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer, IExactSeekPreviewR
     {
         try
         {
-            return new FileInfo(file).Length < minBytes;
+            if (new FileInfo(file).Length < minBytes)
+            {
+                return true;
+            }
+
+            using var decoded = SKBitmap.Decode(file);
+            if (decoded is null)
+            {
+                return false;
+            }
+
+            if (decoded.Width < 8 || decoded.Height < 8)
+            {
+                return false;
+            }
+
+            var luma = AverageLuma(decoded);
+            if (luma < 8)
+            {
+                return true;
+            }
+
+            // Limited-range black JPEGs decode around luma 16 with no texture.
+            return luma < 22 && IsFlat(decoded);
         }
         catch (IOException)
         {
@@ -485,6 +623,45 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer, IExactSeekPreviewR
         {
             return true;
         }
+    }
+
+    private static double AverageLuma(SKBitmap bitmap)
+    {
+        long luma = 0;
+        var n = 0;
+        var stepX = Math.Max(1, bitmap.Width / 32);
+        var stepY = Math.Max(1, bitmap.Height / 32);
+        for (var y = 0; y < bitmap.Height; y += stepY)
+        {
+            for (var x = 0; x < bitmap.Width; x += stepX)
+            {
+                var c = bitmap.GetPixel(x, y);
+                luma += (c.Red * 3) + (c.Green * 6) + c.Blue;
+                n++;
+            }
+        }
+
+        return n == 0 ? 0 : luma / (n * 10.0);
+    }
+
+    private static bool IsFlat(SKBitmap bitmap)
+    {
+        var stepX = Math.Max(1, bitmap.Width / 32);
+        var stepY = Math.Max(1, bitmap.Height / 32);
+        var min = 255;
+        var max = 0;
+        for (var y = 0; y < bitmap.Height; y += stepY)
+        {
+            for (var x = 0; x < bitmap.Width; x += stepX)
+            {
+                var c = bitmap.GetPixel(x, y);
+                var v = ((c.Red * 3) + (c.Green * 6) + c.Blue) / 10;
+                if (v < min) min = v;
+                if (v > max) max = v;
+            }
+        }
+
+        return max - min <= 4;
     }
 
     private void SweepImageDump()
@@ -538,23 +715,6 @@ public sealed class SeekPreviewEngine : ISeekPreviewRenderer, IExactSeekPreviewR
 
         Settle(0.08);
         return FileLooksOpen();
-    }
-
-    private void WaitForSeek()
-    {
-        var wait = _path is not null && _path.Contains("://", StringComparison.Ordinal) ? 700 : 140;
-        var deadline = DateTime.UtcNow.AddMilliseconds(wait);
-        while (DateTime.UtcNow < deadline)
-        {
-            var ev = _mpv.WaitEvent(0.015);
-            if (ev.Id is MpvEventId.PlaybackRestart or MpvEventId.FileLoaded)
-            {
-                Settle(0.01);
-                return;
-            }
-        }
-
-        Settle(0.02);
     }
 
     private void Settle(double seconds)

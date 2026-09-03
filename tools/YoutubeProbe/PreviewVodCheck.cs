@@ -23,16 +23,23 @@ static class PreviewVodCheck
         var started = DateTime.UtcNow;
         engine.Prepare(playable.MediaUrl, playable.Referer);
         Console.WriteLine("prepareMs=" + (int)(DateTime.UtcNow - started).TotalMilliseconds);
-        started = DateTime.UtcNow;
-        var shot = engine.Capture(TimeSpan.FromMinutes(2));
-        Console.WriteLine("captureMs=" + (int)(DateTime.UtcNow - started).TotalMilliseconds);
-        Console.WriteLine("shot=" + (shot ?? "NULL"));
-        var luma = DescribeStill(shot);
-        started = DateTime.UtcNow;
-        var fast = engine.CaptureFast(TimeSpan.FromMinutes(10));
-        Console.WriteLine("fastMs=" + (int)(DateTime.UtcNow - started).TotalMilliseconds);
-        Console.WriteLine("fast=" + (fast ?? "NULL"));
-        return shot is null || luma < 8 ? 3 : 0;
+        var times = new[] { 2, 10, 26, 36 };
+        var good = 0;
+        foreach (var minute in times)
+        {
+            started = DateTime.UtcNow;
+            var shot = engine.CaptureFast(TimeSpan.FromMinutes(minute));
+            Console.WriteLine("lq@" + minute + "m ms=" +
+                              (int)(DateTime.UtcNow - started).TotalMilliseconds);
+            Console.WriteLine("shot=" + (shot ?? "NULL"));
+            if (DescribeStill(shot) >= 8)
+            {
+                good++;
+            }
+        }
+
+        Console.WriteLine("good=" + good + "/" + times.Length);
+        return good >= 2 ? 0 : 3;
     }
 
     private static double DescribeStill(string? path)

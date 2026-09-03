@@ -460,12 +460,10 @@ public sealed class SrtDocument
 
     public SrtCue? CueAt(TimeSpan time)
     {
-        foreach (var cue in Cues)
+        var active = ActiveCueAt(time);
+        if (active is not null)
         {
-            if (time >= cue.Start && time < cue.End)
-            {
-                return cue;
-            }
+            return active;
         }
 
         SrtCue? nearest = null;
@@ -481,6 +479,19 @@ public sealed class SrtDocument
         }
 
         return nearest;
+    }
+
+    public SrtCue? ActiveCueAt(TimeSpan time)
+    {
+        foreach (var cue in Cues)
+        {
+            if (time >= cue.Start && time < cue.End)
+            {
+                return cue;
+            }
+        }
+
+        return null;
     }
 
     public SrtCue InsertAt(int index, TimeSpan start, TimeSpan end, string text)

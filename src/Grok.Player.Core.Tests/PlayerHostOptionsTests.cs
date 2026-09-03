@@ -22,9 +22,11 @@ public sealed class PlayerHostOptionsTests
         Assert.True(fake.HasOption("osc", "no"));
         Assert.True(fake.HasOption("input-default-bindings", "no"));
         Assert.True(fake.HasOption("input-vo-keyboard", "no"));
-        Assert.True(fake.HasOption("vo", "gpu"));
+        Assert.True(fake.HasOption("vo", "gpu-next"));
         Assert.True(fake.HasOption("gpu-api", "d3d11"));
         Assert.True(fake.HasOption("hwdec", "d3d11va-copy"));
+        Assert.True(fake.HasOption("target-colorspace-hint", "yes"));
+        Assert.True(fake.HasOption("target-colorspace-hint-mode", "source"));
         Assert.True(fake.HasOption("ao", "wasapi"));
         Assert.True(fake.HasOption("wid", "99"));
         Assert.True(fake.HasOption("keep-open", "yes"));

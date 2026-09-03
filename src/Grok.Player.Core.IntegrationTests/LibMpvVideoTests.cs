@@ -81,4 +81,20 @@ public sealed class LibMpvVideoTests
         Assert.True(string.IsNullOrWhiteSpace(off) || off is "none" or "[]" or "null", off);
         Assert.True(host.HasMedia);
     }
+
+    [LibMpvFact]
+    public void Native_hdr_hint_round_trips_on_a_live_handle()
+    {
+        using var host = PlayerHost.CreateHeadless();
+        var applied = host.SetVideoEnhance(false, 1, Grok.Player.Core.Video.HdrOutputMode.Native);
+        Assert.True(applied.HdrApplied);
+        Assert.False(applied.VppNeeded);
+        Assert.True(applied.Ok);
+        Assert.Equal("yes", host.GetMpvString("target-colorspace-hint"));
+        Assert.Equal("source", host.GetMpvString("target-colorspace-hint-mode"));
+
+        applied = host.SetVideoEnhance(false, 1, Grok.Player.Core.Video.HdrOutputMode.Off);
+        Assert.True(applied.Ok);
+        Assert.Equal("no", host.GetMpvString("target-colorspace-hint"));
+    }
 }

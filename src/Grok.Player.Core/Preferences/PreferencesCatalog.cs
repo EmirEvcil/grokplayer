@@ -17,6 +17,8 @@ public static class PreferencesCatalog
             new("video-3d", "3D mode"),
             new("video-color", "Color spaces"),
             new("video-resize", "Resizing"),
+            new("video-hdr", "HDR"),
+            new("video-super-resolution", "Super resolution"),
             new("video-deinterlace", "Deinterlacing"),
             new("video-crop", "Extend & crop"),
             new("video-levels", "Levels & balance"),

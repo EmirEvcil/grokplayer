@@ -1176,6 +1176,8 @@ public static class StreamCatalog
             return null;
         }
 
+        var previewSpec = PreviewStoryboardIn(html, url);
+
         if (LooksMediaManifest(html))
         {
             return new YouTubePlayable(
@@ -1186,6 +1188,7 @@ public static class StreamCatalog
                 userAgent: ChromeUa,
                 audioLang: audioLang,
                 subLang: subLang,
+                storyboardSpec: previewSpec,
                 referer: referer ?? url,
                 formatHint: html.AsSpan().TrimStart().StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase) ? "hls" : "dash");
         }
@@ -1205,6 +1208,7 @@ public static class StreamCatalog
                 userAgent: ChromeUa,
                 audioLang: audioLang,
                 subLang: subLang,
+                storyboardSpec: previewSpec,
                 referer: url,
                 formatHint: "hls");
         }
@@ -1259,7 +1263,37 @@ public static class StreamCatalog
             userAgent: ChromeUa,
             audioLang: audioLang,
             subLang: subLang,
+            storyboardSpec: previewSpec,
             referer: url);
+    }
+
+    internal static string? PreviewStoryboardIn(string? html, string pageUrl)
+    {
+        if (string.IsNullOrWhiteSpace(html) || !Uri.TryCreate(pageUrl, UriKind.Absolute, out var page))
+        {
+            return null;
+        }
+
+        var patterns = new[]
+        {
+            @"""(?:file|src|url)""\s*:\s*""(?<url>[^""]+\.vtt[^""]*)""[^\}\]]{0,240}?""(?:kind|type)""\s*:\s*""(?:thumbnails?|storyboard|preview|sprite|timeline)""",
+            @"""(?:kind|type)""\s*:\s*""(?:thumbnails?|storyboard|preview|sprite|timeline)""[^\}\]]{0,240}?""(?:file|src|url)""\s*:\s*""(?<url>[^""]+\.vtt[^""]*)""",
+            @"(?<url>(?:https?:)?//[^\s""'<>]+(?:thumbnail|storyboard|thumb|seeker|filmstrip|sprite|preview|timeline)[^\s""'<>]*\.vtt[^\s""'<>]*)"
+        };
+        foreach (var pattern in patterns)
+        {
+            var match = Regex.Match(html, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (!match.Success) continue;
+            var raw = System.Net.WebUtility.HtmlDecode(match.Groups["url"].Value)
+                .Replace("\\/", "/", StringComparison.Ordinal);
+            if (raw.StartsWith("//", StringComparison.Ordinal)) raw = page.Scheme + ":" + raw;
+            if (Uri.TryCreate(page, raw, out var resolved) && resolved.Scheme is "http" or "https")
+            {
+                return "webvtt:" + resolved.AbsoluteUri;
+            }
+        }
+
+        return null;
     }
 
     private static IReadOnlyList<string> PlayerDocuments(string html)
@@ -1547,23 +1581,16 @@ public static class StreamCatalog
             return [];
         }
 
-        var html = FetchHtml(url, url);
-        if (string.IsNullOrWhiteSpace(html))
+        var pending = new Queue<(string Page, string Referer, int Depth)>();
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        pending.Enqueue((url, url, 0));
+        while (pending.Count > 0 && visited.Count < 18)
         {
-            return [];
-        }
-
-        var local = SidecarCaptionsIn(html);
-        if (local.Count > 0)
-        {
-            return local;
-        }
-
-        foreach (var embed in PlayerEmbedsIn(html, url).Concat(AjaxPlayerEmbeds(html, url)).Distinct(StringComparer.Ordinal).Take(6))
-        {
+            var (page, referer, depth) = pending.Dequeue();
+            if (!visited.Add(page)) continue;
             try
             {
-                if (TryReadPlayturka(embed, out var playturkaId))
+                if (TryReadPlayturka(page, out var playturkaId))
                 {
                     var fromPlayer = PlayturkaCaptions(playturkaId);
                     if (fromPlayer.Count > 0)
@@ -1572,11 +1599,22 @@ public static class StreamCatalog
                     }
                 }
 
-                var nested = FetchHtml(embed, url);
-                var found = SidecarCaptionsIn(nested);
-                if (found.Count > 0)
+                string? html = null;
+                foreach (var tryReferer in new[] { referer, url, PageOrigin(page), page }.Distinct(StringComparer.Ordinal))
                 {
-                    return found;
+                    html = FetchHtml(page, tryReferer);
+                    if (!string.IsNullOrWhiteSpace(html)) break;
+                }
+
+                var found = SidecarCaptionsIn(html);
+                if (found.Count > 0) return found;
+                if (depth >= 3 || string.IsNullOrWhiteSpace(html)) continue;
+                foreach (var embed in PlayerEmbedsIn(html, page)
+                             .Concat(AjaxPlayerEmbeds(html, page))
+                             .Distinct(StringComparer.Ordinal)
+                             .Take(8))
+                {
+                    if (!visited.Contains(embed)) pending.Enqueue((embed, page, depth + 1));
                 }
             }
             catch (Exception)
