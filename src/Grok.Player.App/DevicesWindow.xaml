@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Window
+    x:Class="Grok.Player.App.DevicesWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Devices">
+    <Grid
+        x:Name="Root"
+        Background="#FF101012"
+        PointerMoved="EmptyArea_PointerMoved"
+        PointerPressed="EmptyArea_PointerPressed"
+        PointerReleased="EmptyArea_PointerReleased"
+        PointerCaptureLost="EmptyArea_PointerReleased">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="40" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Grid
+            Background="{StaticResource GrokChromeBrush}"
+            BorderBrush="{StaticResource GrokLineBrush}"
+            BorderThickness="0,0,0,1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Grid x:Name="TitleDrag" Background="Transparent">
+                <StackPanel
+                    Margin="12,0,8,0"
+                    VerticalAlignment="Center"
+                    Orientation="Horizontal"
+                    Spacing="8">
+                    <Image Width="16" Height="16" Source="Assets/Logo.png" Stretch="Uniform" />
+                    <TextBlock
+                        VerticalAlignment="Center"
+                        FontSize="13"
+                        FontWeight="SemiBold"
+                        Foreground="{StaticResource GrokAccentBrush}"
+                        Text="Devices" />
+                </StackPanel>
+            </Grid>
+            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                <Button
+                    x:Name="PinButton"
+                    Click="Pin_Click"
+                    Style="{StaticResource ChromeButton}"
+                    ToolTipService.ToolTip="Keep above player">
+                    <FontIcon x:Name="PinIcon" FontSize="12" Glyph="&#xE840;" />
+                </Button>
+                <Button
+                    Click="Close_Click"
+                    Style="{StaticResource ChromeButton}"
+                    ToolTipService.ToolTip="Close">
+                    <FontIcon FontSize="12" Glyph="&#xE8BB;" />
+                </Button>
+            </StackPanel>
+        </Grid>
+
+        <ScrollViewer Grid.Row="1" Padding="20,16">
+            <StackPanel Spacing="14">
+                <StackPanel Spacing="2">
+                    <TextBlock FontSize="16" FontWeight="SemiBold" Text="This PC" />
+                    <TextBlock
+                        x:Name="ThisPcMeta"
+                        FontSize="12"
+                        Foreground="{StaticResource GrokMutedBrush}"
+                        Text="Visible on the LAN" />
+                </StackPanel>
+
+                <Border
+                    x:Name="PairCard"
+                    Padding="14"
+                    Background="#FF18181C"
+                    BorderBrush="{StaticResource GrokAccentBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Visibility="Collapsed">
+                    <StackPanel Spacing="8">
+                        <TextBlock FontSize="11" Foreground="{StaticResource GrokMutedBrush}" Text="TV IS WAITING" />
+                        <TextBlock x:Name="PairTitle" FontSize="14" FontWeight="SemiBold" Text="Enter the code on the TV" />
+                        <TextBox
+                            x:Name="PinBox"
+                            MaxLength="6"
+                            PlaceholderText="6-digit code"
+                            TextChanged="PinBox_TextChanged" />
+                        <Button
+                            x:Name="PairButton"
+                            Click="Pair_Click"
+                            Content="Pair" />
+                    </StackPanel>
+                </Border>
+
+                <TextBlock FontSize="11" Foreground="{StaticResource GrokMutedBrush}" Text="TRUSTED TELEVISIONS" />
+                <TextBlock
+                    x:Name="EmptyTrust"
+                    FontSize="13"
+                    Foreground="{StaticResource GrokMutedBrush}"
+                    Text="No paired TV yet. On the TV open Settings → Cihazlar → Yeni cihaz eşleştir." />
+                <StackPanel x:Name="TrustList" Spacing="8" />
+
+                <TextBlock FontSize="11" Foreground="{StaticResource GrokMutedBrush}" Text="TRANSFERS" />
+                <StackPanel x:Name="JobList" Spacing="6" />
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Window>

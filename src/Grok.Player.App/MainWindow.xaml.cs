@@ -82,6 +82,8 @@ public sealed partial class MainWindow : Window
     private PreferencesWindow? _preferences;
     private AddStreamWindow? _addStream;
     private DownloadsWindow? _downloads;
+    private DevicesWindow? _devices;
+    private Link.LinkServer? _link;
     private DispatcherTimer? _cursorHideTimer;
     private DispatcherTimer? _livePreviewHarvest;
     private readonly LivePreviewBuffer _livePreviews = new();
@@ -181,7 +183,15 @@ public sealed partial class MainWindow : Window
             _controlPanel?.PlaceAbovePlayerIfPinned();
             _subtitleBrowser?.PlaceAbovePlayerIfPinned();
             _preferences?.PlaceAbovePlayerIfPinned();
+            _devices?.PlaceAbovePlayerIfPinned();
         };
+        _link = new Link.LinkServer(DispatcherQueue, () => _view);
+        _link.PairOffered += (_, _) => DispatcherQueue.TryEnqueue(() =>
+        {
+            if (_devices?.IsOpen == true) return;
+            Devices_Click(this, new RoutedEventArgs());
+        });
+        _link.Start();
         _view.PropertyChanged += (_, _) => QueueApplyView();
         BindPlaylistSource();
         LocalPlaylistView.ItemsSource = _view.Playlist.Items;
@@ -590,6 +600,7 @@ public sealed partial class MainWindow : Window
         _controlPanel?.SyncPlayerAlwaysOnTop(value);
         _subtitleBrowser?.SyncPlayerAlwaysOnTop(value);
         _preferences?.SyncPlayerAlwaysOnTop(value);
+        _devices?.SyncPlayerAlwaysOnTop(value);
         _addStream?.SyncPlayerAlwaysOnTop(value);
         _downloads?.SyncPlayerAlwaysOnTop(value);
     }
@@ -604,6 +615,21 @@ public sealed partial class MainWindow : Window
         EnsurePreferences();
         _preferences!.SetOpen(true);
         ShowActionFeedback("Preferences");
+    }
+
+    private void Devices_Click(object sender, RoutedEventArgs e)
+    {
+        if (_devices is null && _link is not null)
+        {
+            var player = WindowNative.GetWindowHandle(this);
+            _devices = new DevicesWindow(player, _alwaysOnTop, _link);
+            _devices.Closed += (_, _) => _devices = null;
+            var here = AppWindow.Position;
+            _devices.AppWindow.Move(new PointInt32(here.X + 64, here.Y + 72));
+        }
+
+        _devices?.SetOpen(true);
+        ShowActionFeedback("Devices");
     }
 
     private void EnsurePreferences()
@@ -3445,6 +3471,8 @@ public sealed partial class MainWindow : Window
         CloseOwned(_subtitleBrowser, () => _subtitleBrowser = null);
         CloseOwned(_preferences, () => _preferences = null);
         CloseOwned(_downloads, () => _downloads = null);
+        CloseOwned(_devices, () => _devices = null);
+        _link?.Dispose();
         if (!_closing)
         {
             TeardownPlayer();

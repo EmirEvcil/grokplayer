@@ -71,6 +71,7 @@
                 Opening="AppMenu_Opening"
                 Placement="Bottom">
                 <MenuFlyoutItem Click="OpenButton_Click" Text="Open file(s)…" />
+                <MenuFlyoutItem Click="Devices_Click" Text="Devices…" />
                 <MenuFlyoutSubItem Text="Open">
                     <MenuFlyoutItem IsEnabled="False" Text="Coming soon" />
                 </MenuFlyoutSubItem>
@@ -187,6 +188,7 @@
                 <MenuFlyoutItem Text="Full screen (stretch)" />
                 <MenuFlyoutSeparator />
                 <MenuFlyoutItem Click="Preferences_Click" Text="Preferences…" />
+                <MenuFlyoutItem Click="Devices_Click" Text="Devices…" />
                 <ToggleMenuFlyoutItem
                     x:Name="AppMenuPlaylistItem"
                     Click="AppMenuPlaylist_Click"

@@ -586,6 +586,31 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
 
     public bool HasError => !string.IsNullOrWhiteSpace(_errorMessage) || _player.State == PlayerState.Error;
 
+    public void EnqueueOrPlay(string path, bool play, string? title = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        var trimmed = path.Trim();
+        if (UrlSanitizer.IsUrl(trimmed) || YouTubeCatalog.IsWatchUrl(trimmed))
+        {
+            AddStream(trimmed, play, title);
+            return;
+        }
+
+        if (!MediaFiles.IsSupported(trimmed) || !File.Exists(trimmed))
+        {
+            return;
+        }
+
+        _playlist.TryAdd(trimmed, title);
+        if (play)
+        {
+            OpenCurrent(trimmed);
+        }
+
+        BindSubtitles();
+        RefreshFromPlayer();
+    }
+
     public void Open(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
