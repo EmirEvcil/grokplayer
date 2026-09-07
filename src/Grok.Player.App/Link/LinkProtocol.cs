@@ -109,6 +109,15 @@ internal sealed class LinkStateDto
     public string? Resolution { get; set; }
     public string? Dubbing { get; set; }
     public List<LinkJobDto> Jobs { get; set; } = [];
+    public List<LinkHaveDto> Have { get; set; } = [];
+    public LinkResumeDto? Resume { get; set; }
+}
+
+internal sealed class LinkResumeDto
+{
+    public string Title { get; set; } = "";
+    public double Seconds { get; set; }
+    public double Duration { get; set; }
 }
 
 internal sealed class LinkItemDto
@@ -116,6 +125,13 @@ internal sealed class LinkItemDto
     public int Index { get; set; }
     public string Title { get; set; } = "";
     public bool Current { get; set; }
+    public string? Key { get; set; }
+}
+
+internal sealed class LinkHaveDto
+{
+    public string Key { get; set; } = "";
+    public string Title { get; set; } = "";
 }
 
 internal sealed class LinkTrackDto
@@ -146,4 +162,6 @@ internal sealed class LinkCmd
     public string? Title { get; set; }
     public bool? Play { get; set; }
     public string? SubUrl { get; set; }
+    public string? Key { get; set; }
+    public bool? StartOver { get; set; }
 }

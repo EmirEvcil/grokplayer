@@ -74,6 +74,17 @@ public sealed partial class ResumeWindow : Window
         Close();
     }
 
+    public void Dismiss()
+    {
+        if (_decided)
+        {
+            return;
+        }
+
+        _decided = true;
+        Close();
+    }
+
     private void EmptyArea_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
         if (!e.GetCurrentPoint(Root).Properties.IsLeftButtonPressed || e.OriginalSource is Button)

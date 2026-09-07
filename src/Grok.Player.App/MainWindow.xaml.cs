@@ -83,6 +83,7 @@ public sealed partial class MainWindow : Window
     private AddStreamWindow? _addStream;
     private DownloadsWindow? _downloads;
     private DevicesWindow? _devices;
+    private ResumeWindow? _resumeDialog;
     private Link.LinkServer? _link;
     private DispatcherTimer? _cursorHideTimer;
     private DispatcherTimer? _livePreviewHarvest;
@@ -146,6 +147,7 @@ public sealed partial class MainWindow : Window
         };
         _view.Noted += ShowActionFeedback;
         _view.ResumeOffered += record => DispatcherQueue.TryEnqueue(() => OfferResume(record));
+        _view.ResumeSuppressed += () => DispatcherQueue.TryEnqueue(DismissResume);
         _surface.ControlDigit += digit => DispatcherQueue.TryEnqueue(() => HandleImageAdjust(digit));
         _surface.FilesDropped += paths => DispatcherQueue.TryEnqueue(() =>
         {
@@ -191,7 +193,17 @@ public sealed partial class MainWindow : Window
             if (_devices?.IsOpen == true) return;
             Devices_Click(this, new RoutedEventArgs());
         });
-        _link.Start();
+        // Extra windows are just players. The first process keeps the LAN ports.
+        if (!_launchArgs.NewInstance)
+        {
+            try
+            {
+                _link.Start();
+            }
+            catch
+            {
+            }
+        }
         _view.PropertyChanged += (_, _) => QueueApplyView();
         BindPlaylistSource();
         LocalPlaylistView.ItemsSource = _view.Playlist.Items;
@@ -805,14 +817,31 @@ public sealed partial class MainWindow : Window
 
     private void OfferResume(ResumeRecord record)
     {
+        DismissResume();
         var owner = WindowNative.GetWindowHandle(this);
         var at = TimeDisplay.FormatClock(TimeSpan.FromSeconds(record.Seconds));
         var dialog = new ResumeWindow(owner, $"Continue from {at}, or start this video over?");
-        dialog.Continued += () => _view.ContinueResume();
-        dialog.Declined += () => _view.DeclineResume();
+        _resumeDialog = dialog;
+        dialog.Continued += () =>
+        {
+            _resumeDialog = null;
+            _view.ContinueResume();
+        };
+        dialog.Declined += () =>
+        {
+            _resumeDialog = null;
+            _view.DeclineResume();
+        };
         var here = AppWindow.Position;
         dialog.AppWindow.Move(new PointInt32(here.X + 80, here.Y + 90));
         dialog.AppWindow.Show();
+    }
+
+    private void DismissResume()
+    {
+        var dialog = _resumeDialog;
+        _resumeDialog = null;
+        dialog?.Dismiss();
     }
 
     private void LiveButton_Click(object sender, RoutedEventArgs e) => _view.GoLive();
@@ -1913,7 +1942,13 @@ public sealed partial class MainWindow : Window
 
         try
         {
-            Process.Start(info);
+            var started = Process.Start(info);
+            if (started is null)
+            {
+                ShowActionFeedback("Could not open instance");
+                return;
+            }
+
             ShowActionFeedback("Play in new instance");
         }
         catch (Exception ex)
@@ -3427,6 +3462,7 @@ public sealed partial class MainWindow : Window
         }
 
         _closing = true;
+        try { _link?.AnnounceBye(); } catch (Exception) { }
         try { _cursorHideTimer?.Stop(); } catch (Exception) { }
         try { _livePreviewHarvest?.Stop(); } catch (Exception) { }
         try { HideSeekPreview(); } catch (Exception) { }

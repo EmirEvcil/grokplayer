@@ -41,6 +41,8 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
     private string? _resumeApplied;
     private string? _resumeFingerprint;
     private ResumeRecord? _pendingResume;
+    private ResumeDirective _resumeDirective = ResumeDirective.Prompt;
+    private ResumeRecord? _tvResumeOffer;
     private DateTime _lastResumeSave;
     private int _streamRetries;
     private bool _waitForNetwork;
@@ -127,6 +129,17 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
     public event Action<string>? Noted;
 
     public event Action<ResumeRecord>? ResumeOffered;
+    public event Action? ResumeSuppressed;
+
+    public ResumeRecord? TvResumeOffer => _tvResumeOffer;
+
+    private enum ResumeDirective
+    {
+        Prompt,
+        StartOver,
+        Continue,
+        AskTv,
+    }
 
     internal Func<string, YouTubePlayable?>? ResolveYouTube { get; set; }
 
@@ -586,10 +599,17 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
 
     public bool HasError => !string.IsNullOrWhiteSpace(_errorMessage) || _player.State == PlayerState.Error;
 
-    public void EnqueueOrPlay(string path, bool play, string? title = null)
+    public void EnqueueOrPlay(string path, bool play, string? title = null, bool? startOver = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         var trimmed = path.Trim();
+        if (startOver is { } value)
+        {
+            _resumeDirective = value ? ResumeDirective.StartOver : ResumeDirective.Continue;
+            _tvResumeOffer = null;
+            ResumeSuppressed?.Invoke();
+        }
+
         if (UrlSanitizer.IsUrl(trimmed) || YouTubeCatalog.IsWatchUrl(trimmed))
         {
             AddStream(trimmed, play, title);
@@ -613,6 +633,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
 
     public void Open(string path)
     {
+        UseLocalResumePrompt();
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         var trimmed = path.Trim();
         if (MediaFiles.IsSubtitle(trimmed) && File.Exists(trimmed))
@@ -642,6 +663,7 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
 
     public void AcceptPaths(IEnumerable<string> paths)
     {
+        UseLocalResumePrompt();
         var incoming = paths.ToArray();
         var supported = DropPolicy.FilterSupported(incoming)
             .Where(path => UrlSanitizer.IsUrl(path) || !PlaybackMath.LooksLikeLocalPath(path) || File.Exists(path))
@@ -681,7 +703,37 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         RefreshFromPlayer();
     }
 
-    public void PlayIndex(int index) => PlayFrom(VisiblePlaylist, index);
+    public void SuppressResumePrompt()
+    {
+        _pendingResume = null;
+        _tvResumeOffer = null;
+        ResumeSuppressed?.Invoke();
+    }
+
+    public void PlayIndex(int index)
+    {
+        UseLocalResumePrompt();
+        PlayFrom(VisiblePlaylist, index);
+    }
+
+    public void PlayLocalIndex(int index)
+    {
+        _resumeDirective = ResumeDirective.AskTv;
+        _tvResumeOffer = null;
+        ResumeSuppressed?.Invoke();
+        if (_streamTab)
+        {
+            ShowStreamTab(false);
+        }
+
+        PlayFrom(_playlist, index);
+    }
+
+    private void UseLocalResumePrompt()
+    {
+        _resumeDirective = ResumeDirective.Prompt;
+        _tvResumeOffer = null;
+    }
 
     public void ShowStreamTab(bool stream)
     {
@@ -3438,19 +3490,43 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         _resumeApplied = fingerprint;
         if (!_resume.TryGet(fingerprint, out var record) || !ResumeStore.ShouldResume(record))
         {
+            _resumeDirective = ResumeDirective.Prompt;
+            _tvResumeOffer = null;
             return;
         }
 
+        var directive = _resumeDirective;
         _player.Pause();
-        if (ResumeOffered is null)
+        switch (directive)
         {
-            _player.Seek(TimeSpan.FromSeconds(record.Seconds));
-            _player.Play();
-            return;
-        }
+            case ResumeDirective.StartOver:
+                _resumeDirective = ResumeDirective.Prompt;
+                _tvResumeOffer = null;
+                _player.Seek(TimeSpan.Zero);
+                _player.Play();
+                return;
+            case ResumeDirective.Continue:
+                _resumeDirective = ResumeDirective.Prompt;
+                _tvResumeOffer = null;
+                _player.Seek(TimeSpan.FromSeconds(record.Seconds));
+                _player.Play();
+                return;
+            case ResumeDirective.AskTv:
+                _pendingResume = record;
+                _tvResumeOffer = record;
+                return;
+            default:
+                if (ResumeOffered is null)
+                {
+                    _player.Seek(TimeSpan.FromSeconds(record.Seconds));
+                    _player.Play();
+                    return;
+                }
 
-        _pendingResume = record;
-        ResumeOffered.Invoke(record);
+                _pendingResume = record;
+                ResumeOffered.Invoke(record);
+                return;
+        }
     }
 
     public void ContinueResume()
@@ -3461,6 +3537,8 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         }
 
         _pendingResume = null;
+        _tvResumeOffer = null;
+        _resumeDirective = ResumeDirective.Prompt;
         _player.Play();
         RefreshFromPlayer();
     }
@@ -3473,6 +3551,8 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         }
 
         _pendingResume = null;
+        _tvResumeOffer = null;
+        _resumeDirective = ResumeDirective.Prompt;
         _player.Seek(TimeSpan.Zero);
         _player.Play();
         RefreshFromPlayer();

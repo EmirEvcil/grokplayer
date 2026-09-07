@@ -3,6 +3,8 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using Grok.Player.Core.Media;
+using Grok.Player.Core.Playlist;
 using Grok.Player.Core.Presentation;
 using Microsoft.UI.Dispatching;
 
@@ -15,6 +17,7 @@ public sealed class LinkServer : IDisposable
     private readonly string _id = LinkProtocol.DeviceId();
     private readonly string _name = LinkProtocol.DeviceName();
     private readonly ConcurrentDictionary<string, string> _tokens = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, string> _inboxKeys = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, LinkJobDto> _jobs = new(StringComparer.Ordinal);
     private readonly ConcurrentQueue<string> _incomingPins = new();
     private TcpListener? _tcp;
@@ -23,6 +26,9 @@ public sealed class LinkServer : IDisposable
     private string? _pendingTvId;
     private string? _pendingTvName;
     private string? _pendingPin;
+    private string? _acceptedPin;
+    private string? _tvOpened;
+    private bool _inboxRestored;
     public event Action? Changed;
     public event Action<string, string>? PairOffered;
 
@@ -31,6 +37,7 @@ public sealed class LinkServer : IDisposable
         _ui = ui;
         _view = view;
         LoadTokens();
+        LoadInboxKeys();
     }
 
     public string Id => _id;
@@ -49,15 +56,32 @@ public sealed class LinkServer : IDisposable
 
         _cts = new CancellationTokenSource();
         Port = BindHttp();
-        _udp = new UdpClient(new IPEndPoint(IPAddress.Any, LinkProtocol.DiscoverPort))
-        {
-            EnableBroadcast = true,
-        };
-        _udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+        _udp = BindDiscover();
         _ = Task.Run(() => AcceptLoop(_cts.Token));
-        _ = Task.Run(() => UdpLoop(_cts.Token));
-        _ = Task.Run(() => HelloLoop(_cts.Token));
+        if (_udp is not null)
+        {
+            _ = Task.Run(() => UdpLoop(_cts.Token));
+            _ = Task.Run(() => HelloLoop(_cts.Token));
+        }
+
         TryOpenFirewall();
+    }
+
+    private static UdpClient? BindDiscover()
+    {
+        try
+        {
+            var udp = new UdpClient();
+            udp.ExclusiveAddressUse = false;
+            udp.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            udp.Client.Bind(new IPEndPoint(IPAddress.Any, LinkProtocol.DiscoverPort));
+            udp.EnableBroadcast = true;
+            return udp;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     public bool TryAcceptPin(string pin)
@@ -75,6 +99,7 @@ public sealed class LinkServer : IDisposable
 
         var token = Guid.NewGuid().ToString("N");
         _tokens[_pendingTvId] = token;
+        _acceptedPin = trimmed;
         SaveTokens();
         SendUdp(new UdpNote
         {
@@ -88,12 +113,20 @@ public sealed class LinkServer : IDisposable
         });
         _pendingTvId = null;
         _pendingTvName = null;
+        _pendingPin = null;
         Changed?.Invoke();
         return true;
     }
 
+    public bool PairPending => _pendingTvId is not null;
+
     private void RememberOffer(string tvId, string? name, string? pin)
     {
+        if (!string.IsNullOrWhiteSpace(pin) && pin == _acceptedPin)
+        {
+            return;
+        }
+
         var fresh = _pendingTvId != tvId ||
             (!string.IsNullOrWhiteSpace(pin) && _pendingPin != pin);
         _pendingTvId = tvId;
@@ -116,11 +149,29 @@ public sealed class LinkServer : IDisposable
     {
         _tokens.TryRemove(tvId, out _);
         SaveTokens();
+        EndSession();
         Changed?.Invoke();
+    }
+
+    private void EndSession()
+    {
+    }
+
+    public void AnnounceBye()
+    {
+        SendUdp(new UdpNote
+        {
+            T = "bye",
+            Pc = _id,
+            Name = _name,
+            Host = Host,
+            Port = Port,
+        });
     }
 
     public void Dispose()
     {
+        try { AnnounceBye(); } catch { }
         try { _cts?.Cancel(); } catch { }
         try { _tcp?.Stop(); } catch { }
         try { _udp?.Dispose(); } catch { }
@@ -153,14 +204,7 @@ public sealed class LinkServer : IDisposable
     {
         while (!token.IsCancellationRequested)
         {
-            SendUdp(new UdpNote
-            {
-                T = "hello",
-                Pc = _id,
-                Name = _name,
-                Host = Host,
-                Port = Port,
-            });
+            SendHello();
             try { await Task.Delay(2000, token); } catch { return; }
         }
     }
@@ -185,18 +229,43 @@ public sealed class LinkServer : IDisposable
                 continue;
             }
 
+            if (note.T == "who")
+            {
+                SendHello(packet.RemoteEndPoint);
+                continue;
+            }
+
             if (note.T == "offer" && !string.IsNullOrWhiteSpace(note.Tv))
             {
                 RememberOffer(note.Tv, note.Name, note.Pin);
+                SendHello(packet.RemoteEndPoint);
             }
         }
     }
 
-    private void SendUdp(UdpNote note)
+    private void SendHello(IPEndPoint? dest = null)
+    {
+        SendUdp(new UdpNote
+        {
+            T = "hello",
+            Pc = _id,
+            Name = _name,
+            Host = Host,
+            Port = Port,
+        }, dest);
+    }
+
+    private void SendUdp(UdpNote note, IPEndPoint? dest = null)
     {
         try
         {
             var bytes = JsonSerializer.SerializeToUtf8Bytes(note, LinkProtocol.Json);
+            if (dest is not null && _udp is not null)
+            {
+                _udp.Send(bytes, bytes.Length, dest);
+                return;
+            }
+
             using var send = new UdpClient();
             send.EnableBroadcast = true;
             send.Send(bytes, bytes.Length, new IPEndPoint(IPAddress.Broadcast, LinkProtocol.DiscoverPort));
@@ -294,6 +363,20 @@ public sealed class LinkServer : IDisposable
                 {
                     var body = await ReadBody(stream, length, token);
                     var cmd = JsonSerializer.Deserialize<LinkCmd>(body, LinkProtocol.Json) ?? new LinkCmd();
+                    if (cmd.Op == "unpair")
+                    {
+                        var sent = Header(headers, LinkProtocol.TokenHeader);
+                        var tv = _tokens.FirstOrDefault(pair => pair.Value == sent);
+                        if (!string.IsNullOrWhiteSpace(tv.Key))
+                        {
+                            Forget(tv.Key);
+                        }
+                        EndSession();
+                        RunOnUi(() => _view().SuppressResumePrompt());
+                        await WriteJson(stream, 200, Snapshot());
+                        return;
+                    }
+
                     RunOnUi(() => Apply(cmd));
                     await WriteJson(stream, 200, Snapshot());
                     return;
@@ -305,21 +388,35 @@ public sealed class LinkServer : IDisposable
                     var play = Header(headers, "X-Play") != "queue";
                     var title = Header(headers, "X-Title") ?? Path.GetFileNameWithoutExtension(name);
                     var sidecar = Header(headers, "X-Sidecar");
-                    var dest = Path.Combine(LinkProtocol.InboxDir(), SafeName(name));
-                    var job = new LinkJobDto
+                    var key = Header(headers, "X-Key") ?? InboxKey(name, length);
+                    var startOver = Header(headers, "X-Resume") != "continue";
+                    var existing = ResolveInbox(key, title, name, length);
+                    string dest;
+                    if (existing is not null)
                     {
-                        Id = Guid.NewGuid().ToString("N")[..8],
-                        Title = title,
-                        Kind = "copy",
-                        Status = "receiving",
-                        Total = length,
-                    };
-                    _jobs[job.Id] = job;
-                    Changed?.Invoke();
-                    await SaveFile(stream, dest, length, job, token);
-                    job.Status = "ready";
-                    job.Done = job.Total;
-                    Changed?.Invoke();
+                        await Drain(stream, length, token);
+                        dest = existing;
+                    }
+                    else
+                    {
+                        dest = UniqueInboxPath(name);
+                        var job = new LinkJobDto
+                        {
+                            Id = Guid.NewGuid().ToString("N")[..8],
+                            Title = title,
+                            Kind = "copy",
+                            Status = "receiving",
+                            Total = length,
+                        };
+                        _jobs[job.Id] = job;
+                        Changed?.Invoke();
+                        await SaveFile(stream, dest, length, job, token);
+                        job.Status = "ready";
+                        job.Done = job.Total;
+                        Changed?.Invoke();
+                    }
+
+                    RememberInbox(key, dest, title);
                     RunOnUi(() =>
                     {
                         var view = _view();
@@ -329,10 +426,10 @@ public sealed class LinkServer : IDisposable
                         }
                         else
                         {
-                            view.EnqueueOrPlay(dest, play, title);
+                            view.EnqueueOrPlay(dest, play, title, startOver);
                         }
                     });
-                    await WriteJson(stream, 200, new { ok = true, path = dest, job = job.Id });
+                    await WriteJson(stream, 200, new { ok = true, path = dest, job = key });
                     return;
                 }
 
@@ -357,14 +454,18 @@ public sealed class LinkServer : IDisposable
         var done = new ManualResetEventSlim(false);
         if (!_ui.TryEnqueue(() =>
             {
-                try { dto = Capture(); }
+                try
+                {
+                    EnsureInboxRestored();
+                    dto = Capture();
+                }
                 finally { done.Set(); }
             }))
         {
             return dto;
         }
 
-        done.Wait(400);
+        done.Wait(2000);
         return dto;
     }
 
@@ -380,6 +481,7 @@ public sealed class LinkServer : IDisposable
                 Index = i,
                 Title = list.Items[i].Title,
                 Current = i == list.CurrentIndex,
+                Key = InboxKeyOf(list.Items[i].Path, list.Items[i].Title),
             });
         }
 
@@ -410,6 +512,15 @@ public sealed class LinkServer : IDisposable
             Resolution = height,
             Dubbing = dub,
             Jobs = _jobs.Values.OrderByDescending(j => j.Id).Take(8).ToList(),
+            Have = CaptureHave(list),
+            Resume = view.TvResumeOffer is { } offer
+                ? new LinkResumeDto
+                {
+                    Title = offer.Label,
+                    Seconds = offer.Seconds,
+                    Duration = offer.Duration,
+                }
+                : null,
         };
     }
 
@@ -437,13 +548,19 @@ public sealed class LinkServer : IDisposable
                 view.Volume = Math.Clamp(vol, 0, 100);
                 break;
             case "next":
-                view.PlayIndex(view.Playlist.CurrentIndex + 1);
+                view.PlayLocalIndex(view.Playlist.CurrentIndex + 1);
                 break;
             case "prev":
-                view.PlayIndex(Math.Max(0, view.Playlist.CurrentIndex - 1));
+                view.PlayLocalIndex(Math.Max(0, view.Playlist.CurrentIndex - 1));
                 break;
             case "playIndex" when cmd.Index is { } idx:
-                view.PlayIndex(idx);
+                view.PlayLocalIndex(idx);
+                break;
+            case "resumeContinue":
+                view.ContinueResume();
+                break;
+            case "resumeStart":
+                view.DeclineResume();
                 break;
             case "sub" when cmd.Index is { } sub:
                 view.SelectPlayingSubtitle(sub);
@@ -455,10 +572,40 @@ public sealed class LinkServer : IDisposable
                 PickDub(view, lang);
                 break;
             case "open" when !string.IsNullOrWhiteSpace(cmd.Url):
-                view.EnqueueOrPlay(cmd.Url!, cmd.Play != false, cmd.Title);
+                _tvOpened = cmd.Url;
+                view.EnqueueOrPlay(cmd.Url!, cmd.Play != false, cmd.Title, cmd.StartOver);
                 if (!string.IsNullOrWhiteSpace(cmd.SubUrl))
                 {
                     _ = FetchSidecar(cmd.SubUrl!, view);
+                }
+                break;
+            case "openKnown":
+                var known = ResolveInbox(cmd.Key, cmd.Title, null, 0);
+                if (!string.IsNullOrWhiteSpace(known))
+                {
+                    view.EnqueueOrPlay(known, cmd.Play != false, cmd.Title, cmd.StartOver ?? true);
+                }
+                else if (!string.IsNullOrWhiteSpace(cmd.Title))
+                {
+                    var match = view.Playlist.Items.FirstOrDefault(item =>
+                        string.Equals(item.Title, cmd.Title, StringComparison.OrdinalIgnoreCase));
+                    if (match is not null)
+                    {
+                        view.EnqueueOrPlay(match.Path, cmd.Play != false, cmd.Title, cmd.StartOver ?? true);
+                    }
+                }
+                break;
+            case "disconnect":
+                EndSession();
+                view.SuppressResumePrompt();
+                break;
+            case "stopStream":
+                if (string.IsNullOrWhiteSpace(cmd.Url) ||
+                    string.Equals(view.Playlist.CurrentPath, cmd.Url, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(_tvOpened, cmd.Url, StringComparison.OrdinalIgnoreCase))
+                {
+                    view.Stop();
+                    _tvOpened = null;
                 }
                 break;
         }
@@ -564,7 +711,13 @@ public sealed class LinkServer : IDisposable
 
     private static async Task SaveFile(NetworkStream stream, string dest, long length, LinkJobDto job, CancellationToken token)
     {
-        await using var file = File.Create(dest);
+        await using var file = new FileStream(
+            dest,
+            FileMode.Create,
+            FileAccess.Write,
+            FileShare.ReadWrite,
+            64 * 1024,
+            FileOptions.SequentialScan);
         var buf = new byte[64 * 1024];
         long got = 0;
         while (got < length)
@@ -600,6 +753,236 @@ public sealed class LinkServer : IDisposable
 
     private static string? Header(Dictionary<string, string> headers, string key) =>
         headers.TryGetValue(key, out var value) ? value : null;
+
+    private void EnsureInboxRestored()
+    {
+        if (_inboxRestored)
+        {
+            return;
+        }
+
+        _inboxRestored = true;
+        var view = _view();
+        foreach (var path in TvInboxPaths())
+        {
+            view.EnqueueOrPlay(path, play: false, Path.GetFileNameWithoutExtension(path));
+        }
+    }
+
+    private IEnumerable<string> TvInboxPaths()
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var stored in _inboxKeys.Values)
+        {
+            if (File.Exists(stored) && MediaFiles.IsSupported(stored) && !MediaFiles.IsSubtitle(stored) &&
+                seen.Add(Path.GetFullPath(stored)))
+            {
+                yield return stored;
+            }
+        }
+
+        var dir = LinkProtocol.InboxDir();
+        if (!Directory.Exists(dir))
+        {
+            yield break;
+        }
+
+        foreach (var file in Directory.GetFiles(dir))
+        {
+            if (MediaFiles.IsSupported(file) && !MediaFiles.IsSubtitle(file) &&
+                seen.Add(Path.GetFullPath(file)))
+            {
+                yield return file;
+            }
+        }
+    }
+
+    private List<LinkHaveDto> CaptureHave(MediaPlaylist list)
+    {
+        var have = new List<LinkHaveDto>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in _inboxKeys)
+        {
+            if (seen.Add(pair.Key))
+            {
+                have.Add(new LinkHaveDto { Key = pair.Key, Title = Path.GetFileNameWithoutExtension(pair.Value) });
+            }
+        }
+
+        foreach (var item in list.Items)
+        {
+            var key = InboxKeyOf(item.Path, item.Title);
+            if (seen.Add(key))
+            {
+                have.Add(new LinkHaveDto { Key = key, Title = item.Title });
+            }
+
+            var titleKey = "title|" + item.Title.Trim().ToLowerInvariant();
+            if (seen.Add(titleKey))
+            {
+                have.Add(new LinkHaveDto { Key = titleKey, Title = item.Title });
+            }
+        }
+
+        return have;
+    }
+
+    private string? ResolveInbox(string? key, string? title, string? name, long length)
+    {
+        if (!string.IsNullOrWhiteSpace(key) && _inboxKeys.TryGetValue(key, out var mapped) && File.Exists(mapped))
+        {
+            if (length <= 0 || new FileInfo(mapped).Length == length)
+            {
+                return mapped;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(title))
+        {
+            foreach (var pair in _inboxKeys)
+            {
+                if (!File.Exists(pair.Value)) continue;
+                var stem = Path.GetFileNameWithoutExtension(pair.Value);
+                if (stem.Equals(title, StringComparison.OrdinalIgnoreCase) &&
+                    (length <= 0 || new FileInfo(pair.Value).Length == length))
+                {
+                    return pair.Value;
+                }
+            }
+
+            try
+            {
+                var view = _view();
+                var hit = view.Playlist.Items.FirstOrDefault(item =>
+                    item.Title.Equals(title, StringComparison.OrdinalIgnoreCase));
+                if (hit is not null && (UrlSanitizer.IsUrl(hit.Path) || File.Exists(hit.Path)))
+                {
+                    return hit.Path;
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        var source = string.IsNullOrWhiteSpace(name) ? null : SafeName(name);
+        if (!string.IsNullOrWhiteSpace(source))
+        {
+            var dest = Path.Combine(LinkProtocol.InboxDir(), source);
+            if (File.Exists(dest) && (length <= 0 || new FileInfo(dest).Length == length))
+            {
+                return dest;
+            }
+
+            foreach (var file in Directory.Exists(LinkProtocol.InboxDir())
+                         ? Directory.GetFiles(LinkProtocol.InboxDir())
+                         : [])
+            {
+                var fileName = Path.GetFileName(file);
+                if (fileName.StartsWith(Path.GetFileNameWithoutExtension(source), StringComparison.OrdinalIgnoreCase) &&
+                    (length <= 0 || new FileInfo(file).Length == length))
+                {
+                    return file;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private void RememberInbox(string key, string path, string title)
+    {
+        if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(path)) return;
+        _inboxKeys[key] = path;
+        _inboxKeys["title|" + title.Trim().ToLowerInvariant()] = path;
+        SaveInboxKeys();
+    }
+
+    private static string InboxKey(string name, long length) =>
+        Path.GetFileName(name).Trim().ToLowerInvariant() + "|" + length;
+
+    private static string InboxKeyOf(string path, string title)
+    {
+        try
+        {
+            if (!UrlSanitizer.IsUrl(path) && File.Exists(path))
+            {
+                return Path.GetFileName(path).Trim().ToLowerInvariant() + "|" + new FileInfo(path).Length;
+            }
+        }
+        catch
+        {
+        }
+
+        return "title|" + title.Trim().ToLowerInvariant();
+    }
+
+    private static async Task Drain(NetworkStream stream, long length, CancellationToken token)
+    {
+        if (length <= 0) return;
+        var buf = new byte[64 * 1024];
+        long got = 0;
+        while (got < length)
+        {
+            var take = (int)Math.Min(buf.Length, length - got);
+            var n = await stream.ReadAsync(buf.AsMemory(0, take), token);
+            if (n <= 0) break;
+            got += n;
+        }
+    }
+
+    private string InboxKeysPath() => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "GrokPlayer",
+        "tv-inbox.json");
+
+    private void LoadInboxKeys()
+    {
+        try
+        {
+            var path = InboxKeysPath();
+            if (!File.Exists(path)) return;
+            var map = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(path));
+            if (map is null) return;
+            foreach (var pair in map)
+            {
+                if (File.Exists(pair.Value) || UrlSanitizer.IsUrl(pair.Value))
+                {
+                    _inboxKeys[pair.Key] = pair.Value;
+                }
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private void SaveInboxKeys()
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(InboxKeysPath())!);
+            File.WriteAllText(InboxKeysPath(), JsonSerializer.Serialize(_inboxKeys));
+        }
+        catch
+        {
+        }
+    }
+
+    private static string UniqueInboxPath(string name)
+    {
+        var safe = SafeName(name);
+        var dir = LinkProtocol.InboxDir();
+        var dest = Path.Combine(dir, safe);
+        if (!File.Exists(dest))
+        {
+            return dest;
+        }
+
+        var stem = Path.GetFileNameWithoutExtension(safe);
+        var ext = Path.GetExtension(safe);
+        return Path.Combine(dir, $"{stem}-{DateTime.UtcNow:yyyyMMddHHmmssfff}{ext}");
+    }
 
     private static string SafeName(string name)
     {

@@ -112,13 +112,14 @@ public sealed partial class DevicesWindow : Window
     private void Refresh()
     {
         ThisPcMeta.Text = $"{_server.Name} · {_server.Host}:{_server.Port} · visible";
-        if (PinBox.FocusState != FocusState.Unfocused)
+        if (!_server.PairPending)
         {
-            return;
+            PairCard.Visibility = Visibility.Collapsed;
         }
+
         TrustList.Children.Clear();
         EmptyTrust.Visibility = _server.Tokens.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        foreach (var pair in _server.Tokens)
+        foreach (var pair in _server.Tokens.ToArray())
         {
             var id = pair.Key;
             var row = new Grid { ColumnSpacing = 10 };
