@@ -90,13 +90,39 @@
                     </StackPanel>
                 </Border>
 
-                <TextBlock FontSize="11" Foreground="{StaticResource GrokMutedBrush}" Text="TRUSTED TELEVISIONS" />
+                <TextBlock FontSize="11" Foreground="{StaticResource GrokMutedBrush}" Text="CONNECTED" />
+                <StackPanel x:Name="ConnectedList" Spacing="8" />
+                <TextBlock
+                    x:Name="EmptyConnected"
+                    FontSize="13"
+                    Foreground="{StaticResource GrokMutedBrush}"
+                    Text="No TV is connected right now." />
+
+                <TextBlock FontSize="11" Foreground="{StaticResource GrokMutedBrush}" Text="PAIRED" />
                 <TextBlock
                     x:Name="EmptyTrust"
                     FontSize="13"
                     Foreground="{StaticResource GrokMutedBrush}"
-                    Text="No paired TV yet. On the TV open Settings → Cihazlar → Yeni cihaz eşleştir." />
+                    Text="No paired TV yet. On the TV open Settings → Cihazlar and choose a nearby PC." />
                 <StackPanel x:Name="TrustList" Spacing="8" />
+
+                <TextBlock FontSize="11" Foreground="{StaticResource GrokMutedBrush}" Text="SHARED FOLDERS" />
+                <TextBlock
+                    FontSize="12"
+                    Foreground="{StaticResource GrokMutedBrush}"
+                    Text="TV can only open folders you allow here. The TV must also share its folders." />
+                <Button
+                    x:Name="AddFolderButton"
+                    Click="AddFolder_Click"
+                    Content="Allow a folder" />
+                <StackPanel x:Name="FolderList" Spacing="6" />
+
+                <Button
+                    x:Name="BrowseTvButton"
+                    Click="BrowseTv_Click"
+                    Content="Browse TV folders"
+                    Visibility="Collapsed" />
+                <StackPanel x:Name="TvBrowseList" Spacing="6" />
 
                 <TextBlock FontSize="11" Foreground="{StaticResource GrokMutedBrush}" Text="TRANSFERS" />
                 <StackPanel x:Name="JobList" Spacing="6" />

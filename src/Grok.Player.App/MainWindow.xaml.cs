@@ -188,10 +188,27 @@ public sealed partial class MainWindow : Window
             _devices?.PlaceAbovePlayerIfPinned();
         };
         _link = new Link.LinkServer(DispatcherQueue, () => _view);
-        _link.PairOffered += (_, _) => DispatcherQueue.TryEnqueue(() =>
+        _link.PairOffered += (_, name) => DispatcherQueue.TryEnqueue(() =>
         {
-            if (_devices?.IsOpen == true) return;
-            Devices_Click(this, new RoutedEventArgs());
+            try
+            {
+                AppWindow.Show();
+                Activate();
+                Devices_Click(this, new RoutedEventArgs());
+                _devices?.OfferPair(name);
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "crash.log"), ex.ToString());
+                }
+                catch
+                {
+                }
+
+                ShowActionFeedback("Could not open Devices");
+            }
         });
         // Extra windows are just players. The first process keeps the LAN ports.
         if (!_launchArgs.NewInstance)
@@ -631,17 +648,32 @@ public sealed partial class MainWindow : Window
 
     private void Devices_Click(object sender, RoutedEventArgs e)
     {
-        if (_devices is null && _link is not null)
+        try
         {
-            var player = WindowNative.GetWindowHandle(this);
-            _devices = new DevicesWindow(player, _alwaysOnTop, _link);
-            _devices.Closed += (_, _) => _devices = null;
-            var here = AppWindow.Position;
-            _devices.AppWindow.Move(new PointInt32(here.X + 64, here.Y + 72));
-        }
+            if (_devices is null && _link is not null)
+            {
+                var player = WindowNative.GetWindowHandle(this);
+                _devices = new DevicesWindow(player, _alwaysOnTop, _link);
+                _devices.Closed += (_, _) => _devices = null;
+                var here = AppWindow.Position;
+                _devices.AppWindow.Move(new PointInt32(here.X + 64, here.Y + 72));
+            }
 
-        _devices?.SetOpen(true);
-        ShowActionFeedback("Devices");
+            _devices?.SetOpen(true);
+            ShowActionFeedback("Devices");
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "crash.log"), ex.ToString());
+            }
+            catch
+            {
+            }
+
+            ShowActionFeedback("Could not open Devices");
+        }
     }
 
     private void EnsurePreferences()
@@ -847,6 +879,16 @@ public sealed partial class MainWindow : Window
     private void LiveButton_Click(object sender, RoutedEventArgs e) => _view.GoLive();
 
     private void GoLive_Click(object sender, RoutedEventArgs e) => _view.GoLive();
+
+    public void PlayFromTv(string url, string title)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _view.ShowStreamTab(true);
+            _view.EnqueueOrPlay(url, play: true, title, startOver: false);
+            ApplyView();
+        });
+    }
 
     private void OpenStream_Click(object sender, RoutedEventArgs e) => ShowAddStream();
 
@@ -3463,6 +3505,8 @@ public sealed partial class MainWindow : Window
 
         _closing = true;
         try { _link?.AnnounceBye(); } catch (Exception) { }
+        try { _link?.Dispose(); } catch (Exception) { }
+        _link = null;
         try { _cursorHideTimer?.Stop(); } catch (Exception) { }
         try { _livePreviewHarvest?.Stop(); } catch (Exception) { }
         try { HideSeekPreview(); } catch (Exception) { }

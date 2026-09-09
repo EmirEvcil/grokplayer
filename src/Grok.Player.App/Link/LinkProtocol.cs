@@ -91,6 +91,14 @@ internal sealed class UdpNote
     public string? Token { get; set; }
 }
 
+public sealed class TrustedTv
+{
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
+    public string Token { get; set; } = "";
+    public long SeenAt { get; set; }
+}
+
 internal sealed class LinkStateDto
 {
     public bool Connected { get; set; } = true;
@@ -132,6 +140,8 @@ internal sealed class LinkHaveDto
 {
     public string Key { get; set; } = "";
     public string Title { get; set; } = "";
+    public long PositionMs { get; set; }
+    public long DurationMs { get; set; }
 }
 
 internal sealed class LinkTrackDto
@@ -164,4 +174,14 @@ internal sealed class LinkCmd
     public string? SubUrl { get; set; }
     public string? Key { get; set; }
     public bool? StartOver { get; set; }
+    public string? Path { get; set; }
+    public List<LinkProgressDto>? Items { get; set; }
+}
+
+internal sealed class LinkProgressDto
+{
+    public string Key { get; set; } = "";
+    public string Title { get; set; } = "";
+    public long PositionMs { get; set; }
+    public long DurationMs { get; set; }
 }
