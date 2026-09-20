@@ -245,6 +245,7 @@ public sealed partial class MainWindow : Window
         SeekSlider.Loaded += (_, _) => HookSeekSlider();
         SeekSlider.ValueChanged += SeekSlider_ValueChanged;
         VolumeSlider.ValueChanged += VolumeSlider_ValueChanged;
+        HookVolumeSlider();
         TopBar.SizeChanged += (_, _) => UpdateInputRegions();
         BottomBar.SizeChanged += (_, _) => UpdateInputRegions();
         ContentRoot.SizeChanged += (_, _) => UpdateInputRegions();
@@ -890,6 +891,39 @@ public sealed partial class MainWindow : Window
         });
     }
 
+    public void PlayTvFolder(string tvPath, string title)
+    {
+        DispatcherQueue.TryEnqueue(async () =>
+        {
+            var link = _link;
+            if (link is null)
+            {
+                return;
+            }
+
+            var url = await link.ResolveTvFileUrl(tvPath);
+            if (!string.IsNullOrWhiteSpace(url))
+            {
+                _view.ShowStreamTab(true);
+                _view.EnqueueOrPlay(url, play: true, title, startOver: false);
+                ApplyView();
+                return;
+            }
+
+            _view.Note("Receiving from TV…");
+            var local = await link.AskTvPushFile(tvPath, title);
+            if (string.IsNullOrWhiteSpace(local) || !File.Exists(local))
+            {
+                _view.Note("Could not open this TV file.");
+                return;
+            }
+
+            _view.ShowStreamTab(false);
+            _view.EnqueueOrPlay(local, play: true, title, startOver: false);
+            ApplyView();
+        });
+    }
+
     private void OpenStream_Click(object sender, RoutedEventArgs e) => ShowAddStream();
 
     private void AddStream_Click(object sender, RoutedEventArgs e) => ShowAddStream();
@@ -1007,6 +1041,24 @@ public sealed partial class MainWindow : Window
             _preferences?.PlaceAbovePlayerIfPinned();
         });
     }
+
+    private bool _volumeDragging;
+
+    private void HookVolumeSlider()
+    {
+        VolumeSlider.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(VolumeSlider_PointerPressed), true);
+        VolumeSlider.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(VolumeSlider_PointerReleased), true);
+        VolumeSlider.AddHandler(UIElement.PointerCaptureLostEvent, new PointerEventHandler(VolumeSlider_PointerReleased), true);
+        if (FindDescendant<Thumb>(VolumeSlider) is { } thumb)
+        {
+            thumb.DragStarted += (_, _) => _volumeDragging = true;
+            thumb.DragCompleted += (_, _) => _volumeDragging = false;
+        }
+    }
+
+    private void VolumeSlider_PointerPressed(object sender, PointerRoutedEventArgs e) => _volumeDragging = true;
+
+    private void VolumeSlider_PointerReleased(object sender, PointerRoutedEventArgs e) => _volumeDragging = false;
 
     private void VolumeSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
     {
@@ -2191,7 +2243,7 @@ public sealed partial class MainWindow : Window
                 PlayPauseIcon.Glyph = _view.PlayPauseGlyph;
             }
 
-            if (_view.HoldsTransport)
+            if (_view.HoldsTransport && !_view.IsSeeking)
             {
                 HideSeekPreview();
                 _flyout.Clear();
@@ -2248,7 +2300,7 @@ public sealed partial class MainWindow : Window
 
             SetText(PositionTimeText, _view.PositionText);
             SetText(DurationTimeText, _view.DurationText);
-            if (Math.Abs(VolumeSlider.Value - _view.Volume) > 0.4)
+            if (!_volumeDragging && Math.Abs(VolumeSlider.Value - _view.Volume) > 0.4)
             {
                 VolumeSlider.Value = _view.Volume;
             }

@@ -35,6 +35,11 @@ public sealed class StreamCatalogTests
     {
         Assert.True(StreamCatalog.IsDirectMedia("https://cdn.example/movie.m3u8"));
         Assert.True(StreamCatalog.IsDirectMedia("https://cdn.example/film.mp4"));
+        Assert.True(StreamCatalog.IsLanFile("http://192.168.1.20:17423/v1/file?path=C%3A%2Fvideo%2Ffoo.mp4&token=abc"));
+        Assert.True(StreamCatalog.IsDirectMedia("http://192.168.1.20:17423/v1/file?path=C%3A%2Fvideo%2Ffoo.mp4&token=abc"));
+        Assert.False(StreamCatalog.LooksResolvable("http://192.168.1.20:17423/v1/file?path=C%3A%2Fvideo%2Ffoo.mp4&token=abc"));
+        Assert.Equal(".mp4", StreamProbe.Extension("http://192.168.1.20:17423/v1/file?path=C%3A%2Fvideo%2Ffoo.mp4&token=abc"));
+        Assert.Equal(StreamKind.Vod, StreamProbe.ClassifyUrl("http://192.168.1.20:17423/v1/file?path=C%3A%2Fvideo%2Ffoo.mp4&token=abc"));
         Assert.False(StreamCatalog.LooksResolvable("https://cdn.example/movie.m3u8"));
         Assert.False(StreamCatalog.LooksResolvable("https://www.youtube.com/watch?v=dQw4w9wgBcQ"));
         Assert.True(StreamCatalog.LooksResolvable("https://rumble.com/v7elrde-the-time-norm-macdonald-crashed-the-youtube-awards.html"));

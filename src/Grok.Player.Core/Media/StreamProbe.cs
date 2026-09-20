@@ -41,6 +41,14 @@ public static class StreamProbe
         if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
         {
             path = uri.AbsolutePath;
+            if (path.Equals("/v1/file", StringComparison.OrdinalIgnoreCase))
+            {
+                var file = QueryValue(uri.Query, "path");
+                if (!string.IsNullOrWhiteSpace(file))
+                {
+                    path = file;
+                }
+            }
         }
 
         var q = path.IndexOf('?', StringComparison.Ordinal);
@@ -52,11 +60,39 @@ public static class StreamProbe
         return Path.GetExtension(path);
     }
 
+    private static string? QueryValue(string query, string name)
+    {
+        var text = query.TrimStart('?');
+        foreach (var part in text.Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var eq = part.IndexOf('=');
+            if (eq <= 0)
+            {
+                continue;
+            }
+
+            if (!part[..eq].Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            return Uri.UnescapeDataString(part[(eq + 1)..].Replace('+', ' '));
+        }
+
+        return null;
+    }
+
     public static StreamKind ClassifyUrl(string url)
     {
         if (string.IsNullOrWhiteSpace(url))
         {
             return StreamKind.Unknown;
+        }
+
+        if (Uri.TryCreate(url, UriKind.Absolute, out var mediaUri) &&
+            mediaUri.AbsolutePath.Equals("/v1/file", StringComparison.OrdinalIgnoreCase))
+        {
+            return StreamKind.Vod;
         }
 
         var ext = Extension(url);

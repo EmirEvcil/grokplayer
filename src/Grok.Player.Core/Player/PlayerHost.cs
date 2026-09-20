@@ -34,6 +34,7 @@ public sealed class PlayerHost : IDisposable
     private string? _extraAudio;
     private string? _pendingSubFile;
     private bool _wantMuted;
+    private double _userVolume;
     private bool _styledSubtitle;
     private string _subtitleFont = "Segoe UI";
     private double _subtitleFontSize = 55;
@@ -49,6 +50,7 @@ public sealed class PlayerHost : IDisposable
         _ownsNative = ownsNative;
         _sync = SynchronizationContext.Current;
         Volume = PlaybackMath.ClampVolume(_options.InitialVolume);
+        _userVolume = Volume;
 
         ApplyStartupOptions();
         _mpv.Initialize();
@@ -498,20 +500,11 @@ public sealed class PlayerHost : IDisposable
     {
         EnsureNotDisposed();
         var clamped = PlaybackMath.ClampVolume(volume);
+        _userVolume = clamped;
         _mpv.SetPropertyDouble("volume", clamped);
-        if (clamped <= 0)
-        {
-            _mpv.SetPropertyFlag("mute", true);
-        }
-        else
-        {
-            _mpv.SetPropertyFlag("mute", false);
-        }
-
         lock (_gate)
         {
             Volume = clamped;
-            IsMuted = clamped <= 0;
         }
 
         Raise(VolumeChanged);
@@ -540,7 +533,7 @@ public sealed class PlayerHost : IDisposable
 
     private void ApplyDesiredAudio()
     {
-        if (_wantMuted || Volume <= 0)
+        if (_wantMuted)
         {
             SilenceOutput();
             lock (_gate)
@@ -1698,7 +1691,14 @@ public sealed class PlayerHost : IDisposable
             SetState_NoLock(paused ? PlayerState.Paused : PlayerState.Playing);
         }
 
+        SetVolume(_userVolume);
         ApplyDesiredAudio();
+
+        if (string.IsNullOrWhiteSpace(_extraAudio))
+        {
+            TrySetProperty("aid", "auto");
+        }
+
         SelectLanguageTracks();
         SelectAttachedAudio();
         if (!string.IsNullOrWhiteSpace(_pendingSubFile))
@@ -1848,9 +1848,15 @@ public sealed class PlayerHost : IDisposable
             case "volume":
                 if (ev.PropertyValue is double volume)
                 {
+                    if (State == PlayerState.Opening)
+                    {
+                        break;
+                    }
+
                     lock (_gate)
                     {
                         Volume = PlaybackMath.ClampVolume(volume);
+                        _userVolume = Volume;
                     }
 
                     Raise(VolumeChanged);
@@ -1889,7 +1895,23 @@ public sealed class PlayerHost : IDisposable
             case "mute":
                 if (ev.PropertyValue is bool muted)
                 {
-                    if (!_wantMuted && muted && Volume > 0)
+                    if (_wantMuted)
+                    {
+                        if (!muted)
+                        {
+                            SilenceOutput();
+                        }
+
+                        lock (_gate)
+                        {
+                            IsMuted = true;
+                        }
+
+                        Raise(VolumeChanged);
+                        break;
+                    }
+
+                    if (muted && Volume > 0)
                     {
                         RestoreOutput();
                         break;
@@ -1897,7 +1919,7 @@ public sealed class PlayerHost : IDisposable
 
                     lock (_gate)
                     {
-                        IsMuted = muted || _wantMuted;
+                        IsMuted = muted;
                     }
 
                     Raise(VolumeChanged);
@@ -2280,7 +2302,7 @@ public sealed class PlayerHost : IDisposable
             return;
         }
 
-        if (!UrlSanitizer.IsUrl(path))
+        if (!UrlSanitizer.IsUrl(path) || StreamCatalog.IsLanFile(path))
         {
             TrySetProperty("user-agent", "Mozilla/5.0 GrokPlayer/1.0");
             TrySetProperty("referrer", "");

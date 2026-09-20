@@ -119,6 +119,28 @@ internal sealed class LinkStateDto
     public List<LinkJobDto> Jobs { get; set; } = [];
     public List<LinkHaveDto> Have { get; set; } = [];
     public LinkResumeDto? Resume { get; set; }
+    public LinkBrowseAskDto? Browse { get; set; }
+    public LinkVodAskDto? VodAsk { get; set; }
+}
+
+internal sealed class LinkBrowseAskDto
+{
+    public string Id { get; set; } = "";
+    public string Path { get; set; } = "";
+}
+
+internal sealed class LinkVodAskDto
+{
+    public string Id { get; set; } = "";
+    public string Path { get; set; } = "";
+    public string Title { get; set; } = "";
+    public long CreatedAt { get; set; }
+}
+
+internal sealed class LinkTvMetaDto
+{
+    public List<string> Hosts { get; set; } = [];
+    public int Port { get; set; }
 }
 
 internal sealed class LinkResumeDto

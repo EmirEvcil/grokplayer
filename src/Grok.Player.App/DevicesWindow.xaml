@@ -7,6 +7,7 @@
     <Grid
         x:Name="Root"
         Background="#FF101012"
+        RequestedTheme="Dark"
         PointerMoved="EmptyArea_PointerMoved"
         PointerPressed="EmptyArea_PointerPressed"
         PointerReleased="EmptyArea_PointerReleased"
@@ -56,28 +57,51 @@
             </StackPanel>
         </Grid>
 
-        <ScrollViewer Grid.Row="1" Padding="20,16">
-            <StackPanel Spacing="14">
-                <StackPanel Spacing="2">
-                    <TextBlock FontSize="16" FontWeight="SemiBold" Text="This PC" />
-                    <TextBlock
-                        x:Name="ThisPcMeta"
-                        FontSize="12"
-                        Foreground="{StaticResource GrokMutedBrush}"
-                        Text="Visible on the LAN" />
-                </StackPanel>
+        <ScrollViewer
+            x:Name="HomeView"
+            Grid.Row="1"
+            Padding="18,16,18,20"
+            HorizontalScrollBarVisibility="Disabled"
+            VerticalScrollBarVisibility="Auto">
+            <StackPanel Spacing="16">
+                <Border
+                    Padding="12,10"
+                    Background="#FF161618"
+                    BorderBrush="{StaticResource GrokLineBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8">
+                    <StackPanel Spacing="2">
+                        <TextBlock
+                            FontSize="11"
+                            Foreground="{StaticResource GrokMutedBrush}"
+                            Text="THIS PC" />
+                        <TextBlock
+                            x:Name="ThisPcMeta"
+                            FontSize="13"
+                            FontWeight="SemiBold"
+                            Text="Visible on the LAN"
+                            TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
 
                 <Border
                     x:Name="PairCard"
                     Padding="14"
                     Background="#FF18181C"
-                    BorderBrush="{StaticResource GrokAccentBrush}"
+                    BorderBrush="#66F0C93A"
                     BorderThickness="1"
                     CornerRadius="8"
                     Visibility="Collapsed">
                     <StackPanel Spacing="8">
-                        <TextBlock FontSize="11" Foreground="{StaticResource GrokMutedBrush}" Text="TV IS WAITING" />
-                        <TextBlock x:Name="PairTitle" FontSize="14" FontWeight="SemiBold" Text="Enter the code on the TV" />
+                        <TextBlock
+                            FontSize="11"
+                            Foreground="{StaticResource GrokAccentBrush}"
+                            Text="TV IS WAITING" />
+                        <TextBlock
+                            x:Name="PairTitle"
+                            FontSize="14"
+                            FontWeight="SemiBold"
+                            Text="Enter the code shown on the TV" />
                         <TextBox
                             x:Name="PinBox"
                             MaxLength="6"
@@ -85,48 +109,141 @@
                             TextChanged="PinBox_TextChanged" />
                         <Button
                             x:Name="PairButton"
+                            HorizontalAlignment="Left"
                             Click="Pair_Click"
-                            Content="Pair" />
+                            Content="Pair"
+                            Style="{StaticResource AccentActionButton}" />
                     </StackPanel>
                 </Border>
 
-                <TextBlock FontSize="11" Foreground="{StaticResource GrokMutedBrush}" Text="CONNECTED" />
-                <StackPanel x:Name="ConnectedList" Spacing="8" />
-                <TextBlock
-                    x:Name="EmptyConnected"
-                    FontSize="13"
-                    Foreground="{StaticResource GrokMutedBrush}"
-                    Text="No TV is connected right now." />
+                <StackPanel Spacing="8">
+                    <TextBlock
+                        FontSize="11"
+                        Foreground="{StaticResource GrokMutedBrush}"
+                        Text="TELEVISIONS" />
+                    <StackPanel x:Name="TvList" Spacing="8" />
+                    <TextBlock
+                        x:Name="EmptyTvs"
+                        FontSize="13"
+                        Foreground="{StaticResource GrokMutedBrush}"
+                        Text="No TV paired yet. On the TV open Settings → Cihazlar and choose this PC."
+                        TextWrapping="Wrap" />
+                </StackPanel>
 
-                <TextBlock FontSize="11" Foreground="{StaticResource GrokMutedBrush}" Text="PAIRED" />
-                <TextBlock
-                    x:Name="EmptyTrust"
-                    FontSize="13"
-                    Foreground="{StaticResource GrokMutedBrush}"
-                    Text="No paired TV yet. On the TV open Settings → Cihazlar and choose a nearby PC." />
-                <StackPanel x:Name="TrustList" Spacing="8" />
+                <StackPanel Spacing="8">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Spacing="2">
+                            <TextBlock
+                                FontSize="11"
+                                Foreground="{StaticResource GrokMutedBrush}"
+                                Text="SHARE FROM THIS PC" />
+                            <TextBlock
+                                FontSize="12"
+                                Foreground="{StaticResource GrokMutedBrush}"
+                                Text="Only these folders can be opened on the TV."
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                        <Button
+                            Grid.Column="1"
+                            VerticalAlignment="Center"
+                            Click="AddFolder_Click"
+                            Content="Add folder"
+                            Style="{StaticResource SubBarButton}" />
+                    </Grid>
+                    <StackPanel x:Name="FolderList" Spacing="6" />
+                    <TextBlock
+                        x:Name="EmptyFolders"
+                        FontSize="13"
+                        Foreground="{StaticResource GrokMutedBrush}"
+                        Text="No folders shared yet." />
+                </StackPanel>
 
-                <TextBlock FontSize="11" Foreground="{StaticResource GrokMutedBrush}" Text="SHARED FOLDERS" />
-                <TextBlock
-                    FontSize="12"
-                    Foreground="{StaticResource GrokMutedBrush}"
-                    Text="TV can only open folders you allow here. The TV must also share its folders." />
-                <Button
-                    x:Name="AddFolderButton"
-                    Click="AddFolder_Click"
-                    Content="Allow a folder" />
-                <StackPanel x:Name="FolderList" Spacing="6" />
-
-                <Button
-                    x:Name="BrowseTvButton"
-                    Click="BrowseTv_Click"
-                    Content="Browse TV folders"
-                    Visibility="Collapsed" />
-                <StackPanel x:Name="TvBrowseList" Spacing="6" />
-
-                <TextBlock FontSize="11" Foreground="{StaticResource GrokMutedBrush}" Text="TRANSFERS" />
-                <StackPanel x:Name="JobList" Spacing="6" />
+                <StackPanel x:Name="TransfersSection" Spacing="8" Visibility="Collapsed">
+                    <TextBlock
+                        FontSize="11"
+                        Foreground="{StaticResource GrokMutedBrush}"
+                        Text="TRANSFERS" />
+                    <StackPanel x:Name="JobList" Spacing="6" />
+                </StackPanel>
             </StackPanel>
         </ScrollViewer>
+
+        <Grid
+            x:Name="BrowseView"
+            Grid.Row="1"
+            Visibility="Collapsed">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <Border
+                Padding="10,8,10,8"
+                Background="#FF161618"
+                BorderBrush="{StaticResource GrokLineBrush}"
+                BorderThickness="0,0,0,1">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Button
+                        x:Name="BrowseBack"
+                        Click="BrowseBack_Click"
+                        Style="{StaticResource SubIconButton}"
+                        ToolTipService.ToolTip="Back">
+                        <FontIcon FontSize="12" Glyph="&#xE72B;" />
+                    </Button>
+                    <StackPanel
+                        Grid.Column="1"
+                        Margin="10,0,8,0"
+                        VerticalAlignment="Center"
+                        Spacing="1">
+                        <TextBlock
+                            x:Name="BrowseTitle"
+                            FontSize="13"
+                            FontWeight="SemiBold"
+                            Text="TV folders"
+                            TextTrimming="CharacterEllipsis" />
+                        <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                            <StackPanel
+                                x:Name="BrowseCrumbs"
+                                Orientation="Horizontal"
+                                Spacing="4" />
+                        </ScrollViewer>
+                    </StackPanel>
+                    <Button
+                        Grid.Column="2"
+                        Click="BrowseClose_Click"
+                        Style="{StaticResource SubIconButton}"
+                        ToolTipService.ToolTip="Close browser">
+                        <FontIcon FontSize="11" Glyph="&#xE711;" />
+                    </Button>
+                </Grid>
+            </Border>
+            <Grid Grid.Row="1">
+                <ScrollViewer
+                    Padding="12,10,12,16"
+                    HorizontalScrollBarVisibility="Disabled"
+                    VerticalScrollBarVisibility="Auto">
+                    <StackPanel x:Name="BrowseList" Spacing="4" />
+                </ScrollViewer>
+                <TextBlock
+                    x:Name="EmptyBrowse"
+                    Margin="24"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    FontSize="13"
+                    Foreground="{StaticResource GrokMutedBrush}"
+                    Text="This folder is empty."
+                    TextAlignment="Center"
+                    TextWrapping="Wrap"
+                    Visibility="Collapsed" />
+            </Grid>
+        </Grid>
     </Grid>
 </Window>

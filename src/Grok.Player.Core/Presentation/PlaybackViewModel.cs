@@ -424,9 +424,9 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         }
     }
 
-    public bool IsMuted => _player.IsMuted || Volume <= 0;
+    public bool IsMuted => _player.IsMuted;
 
-    public string VolumeGlyph => IsMuted || Volume <= 0 ? "\uE74F" : Volume < 50 ? "\uE993" : "\uE767";
+    public string VolumeGlyph => IsMuted ? "\uE74F" : Volume <= 0 ? "\uE74F" : Volume < 50 ? "\uE993" : "\uE767";
 
     public string Title => string.IsNullOrWhiteSpace(_player.MediaTitle) ? "GrokPlayer" : _player.MediaTitle;
 
@@ -710,6 +710,41 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
         ResumeSuppressed?.Invoke();
     }
 
+    public long LinkedResumeMs(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return 0;
+        }
+
+        var fingerprint = ContentFingerprint.ForLocalFile(path);
+        if (_resume.TryGet(fingerprint, out var record) && ResumeStore.ShouldResume(record))
+        {
+            return (long)(record.Seconds * 1000);
+        }
+
+        return 0;
+    }
+
+    public void ImportLinkedResume(string? path, string label, long positionMs, long durationMs = 0)
+    {
+        if (positionMs < 5_000 || string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return;
+        }
+
+        var seconds = positionMs / 1000.0;
+        var duration = durationMs >= 10_000
+            ? durationMs / 1000.0
+            : Math.Max(seconds / 0.5, 120);
+        if (seconds > duration * 0.95)
+        {
+            return;
+        }
+
+        _resume.Save(ContentFingerprint.ForLocalFile(path), string.IsNullOrWhiteSpace(label) ? Path.GetFileName(path) : label, seconds, duration);
+    }
+
     public void PlayIndex(int index)
     {
         UseLocalResumePrompt();
@@ -899,6 +934,10 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             {
                 item.StreamKind = protocolKind;
             }
+            else if (StreamCatalog.IsLanFile(trimmed))
+            {
+                item.StreamKind = StreamKind.Vod;
+            }
 
             if (!string.IsNullOrWhiteSpace(referer))
             {
@@ -1079,12 +1118,22 @@ public sealed class PlaybackViewModel : INotifyPropertyChanged, IDisposable
             if (_isLive && _player.LiveEdge > TimeSpan.Zero)
             {
                 var edge = _player.LiveEdge;
-                if (_player.Duration is { } duration && duration > edge)
+                if (_player.Duration is { } liveDuration && liveDuration > edge)
                 {
-                    return duration;
+                    return liveDuration;
                 }
 
                 return edge;
+            }
+
+            if (_player.Duration is { } known && known > TimeSpan.Zero)
+            {
+                return known;
+            }
+
+            if (_player.CacheEndSeconds > 1)
+            {
+                return TimeSpan.FromSeconds(_player.CacheEndSeconds);
             }
 
             return _player.Duration;

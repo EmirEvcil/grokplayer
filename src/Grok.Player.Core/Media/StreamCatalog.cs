@@ -320,6 +320,11 @@ public static class StreamCatalog
             return false;
         }
 
+        if (IsLanFile(url))
+        {
+            return true;
+        }
+
         var ext = StreamProbe.Extension(url);
         if (ext is ".m3u8" or ".m3u" or ".mpd" or ".mp4" or ".mkv" or ".webm" or ".mov" or ".m4v" ||
             IsMediaCdn(url))
@@ -346,6 +351,10 @@ public static class StreamCatalog
                (uri.Query.Contains("verify=", StringComparison.OrdinalIgnoreCase) ||
                 uri.Host.Contains("fastplay.", StringComparison.OrdinalIgnoreCase));
     }
+
+    public static bool IsLanFile(string? url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
+        uri.AbsolutePath.Equals("/v1/file", StringComparison.OrdinalIgnoreCase);
 
     public static bool IsMediaCdn(string? url)
     {

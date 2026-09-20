@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net;
+using System.Net.Http;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -34,6 +36,13 @@ public sealed class LinkServer : IDisposable
     private string? _sessionTvId;
     private string? _tvHost;
     private int _tvPort = 17423;
+    private LinkBrowseAskDto? _browseAsk;
+    private string? _browseWaitId;
+    private TaskCompletionSource<string?>? _browseWait;
+    private readonly List<string> _tvOfferHosts = [];
+    private LinkVodAskDto? _vodAsk;
+    private string? _vodWaitId;
+    private TaskCompletionSource<string?>? _vodWait;
     private readonly ConcurrentDictionary<string, LinkProgressDto> _progress = new(StringComparer.OrdinalIgnoreCase);
     private long _lastAuthAt;
     private bool _inboxRestored;
@@ -57,6 +66,113 @@ public sealed class LinkServer : IDisposable
     public string? SessionToken =>
         _sessionTvId is { } id && _tokens.TryGetValue(id, out var token) ? token : null;
     public IEnumerable<LinkJobDto> Jobs => _jobs.Values;
+
+    public async Task<string?> AskTvBrowse(string path, int timeoutMs = 8000)
+    {
+        var id = Guid.NewGuid().ToString("N")[..8];
+        var wait = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _browseWaitId = id;
+        _browseWait = wait;
+        _browseAsk = new LinkBrowseAskDto { Id = id, Path = path ?? "" };
+        using var timeout = new CancellationTokenSource(timeoutMs);
+        using var _ = timeout.Token.Register(() => wait.TrySetResult(null));
+        var json = await wait.Task.ConfigureAwait(true);
+        if (_browseWaitId == id)
+        {
+            _browseWait = null;
+            _browseWaitId = null;
+            _browseAsk = null;
+        }
+
+        return json;
+    }
+
+    public async Task<string?> ResolveTvFileUrl(string path)
+    {
+        var token = SessionToken;
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            return null;
+        }
+
+        TryAdbForward(_tvPort);
+        var safe = (path ?? "").Replace('\\', '/');
+        var hosts = new List<string>();
+        hosts.AddRange(_tvOfferHosts.Where(item => !string.IsNullOrWhiteSpace(item)));
+        if (!string.IsNullOrWhiteSpace(_tvHost))
+        {
+            hosts.Add(_tvHost);
+        }
+
+        hosts.Add("127.0.0.1");
+        var unique = hosts.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        using var client = new HttpClient { Timeout = TimeSpan.FromMilliseconds(1200) };
+        client.DefaultRequestHeaders.TryAddWithoutValidation(LinkProtocol.TokenHeader, token);
+        foreach (var host in unique)
+        {
+            var url = $"http://{host}:{_tvPort}/v1/file?path={Uri.EscapeDataString(safe)}&token={Uri.EscapeDataString(token)}";
+            if (await ReachableAsync(client, url).ConfigureAwait(true))
+            {
+                return url;
+            }
+        }
+
+        return null;
+    }
+
+    public async Task<string?> AskTvPushFile(string path, string title, int timeoutMs = 600_000)
+    {
+        var id = Guid.NewGuid().ToString("N")[..8];
+        var wait = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _vodWaitId = id;
+        _vodWait = wait;
+        _vodAsk = new LinkVodAskDto
+        {
+            Id = id,
+            Path = path ?? "",
+            Title = title ?? "",
+            CreatedAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+        };
+        using var timeout = new CancellationTokenSource(timeoutMs);
+        using var _ = timeout.Token.Register(() => wait.TrySetResult(null));
+        var dest = await wait.Task.ConfigureAwait(true);
+        if (_vodWaitId == id)
+        {
+            _vodWait = null;
+            _vodWaitId = null;
+            _vodAsk = null;
+        }
+
+        return dest;
+    }
+
+    private static async Task<bool> ReachableAsync(HttpClient client, string url)
+    {
+        try
+        {
+            using var head = new HttpRequestMessage(HttpMethod.Head, url);
+            using var headResp = await client.SendAsync(head).ConfigureAwait(true);
+            if ((int)headResp.StatusCode is >= 200 and < 400)
+            {
+                return true;
+            }
+        }
+        catch
+        {
+        }
+
+        try
+        {
+            using var get = new HttpRequestMessage(HttpMethod.Get, url);
+            get.Headers.TryAddWithoutValidation("Range", "bytes=0-1");
+            using var getResp = await client.SendAsync(get, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(true);
+            return (int)getResp.StatusCode is >= 200 and < 400;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     public IReadOnlyList<TrustedTv> Televisions()
     {
@@ -453,7 +569,7 @@ public sealed class LinkServer : IDisposable
             }
 
             stream.ReadTimeout = 120_000;
-            stream.WriteTimeout = 30_000;
+            stream.WriteTimeout = Timeout.Infinite;
             var header = await ReadHeaders(stream, token);
             if (header is null)
             {
@@ -543,11 +659,11 @@ public sealed class LinkServer : IDisposable
 
                 if (method == "GET" && path.StartsWith("/v1/browse", StringComparison.Ordinal))
                 {
-                    await WriteJson(stream, 200, Browse(Query(path, "path")));
+                    await WriteJson(stream, 200, Browse(Query(path, "path"), Query(path, "deep") == "1"));
                     return;
                 }
 
-                if (method == "GET" && path.StartsWith("/v1/file", StringComparison.Ordinal))
+                if ((method == "GET" || method == "HEAD") && path.StartsWith("/v1/file", StringComparison.Ordinal))
                 {
                     var filePath = SharedFolders.Resolve(Query(path, "path"));
                     if (filePath is null || !File.Exists(filePath) || !MediaFiles.IsSupported(filePath))
@@ -556,7 +672,101 @@ public sealed class LinkServer : IDisposable
                         return;
                     }
 
-                    await WriteFile(stream, filePath, Header(headers, "Range"), method);
+                    try
+                    {
+                        await WriteFile(stream, filePath, Header(headers, "Range"), method);
+                        await stream.FlushAsync();
+                        await Task.Delay(40);
+                    }
+                    catch
+                    {
+                    }
+
+                    return;
+                }
+
+                if ((method == "PUT" || method == "POST") && path.StartsWith("/v1/tv-vod/", StringComparison.Ordinal))
+                {
+                    var id = Uri.UnescapeDataString(path["/v1/tv-vod/".Length..].Trim('/'));
+                    var title = Header(headers, "X-Title") ?? id;
+                    var name = Header(headers, "X-Name");
+                    if (string.IsNullOrWhiteSpace(name))
+                    {
+                        name = SafeName(title) + ".mp4";
+                    }
+
+                    var dest = UniqueInboxPath(name);
+                    var job = new LinkJobDto
+                    {
+                        Id = id,
+                        Title = title,
+                        Kind = "copy",
+                        Status = "receiving",
+                        Total = length,
+                    };
+                    _jobs[job.Id] = job;
+                    RaiseChanged();
+                    await SaveFile(stream, dest, length, job, token);
+                    job.Status = "done";
+                    job.Done = job.Total;
+                    RememberInbox(InboxKey(name, length), dest, title);
+                    _vodWait?.TrySetResult(dest);
+                    _vodAsk = null;
+                    _vodWaitId = null;
+                    _vodWait = null;
+                    RaiseChanged();
+                    await WriteJson(stream, 200, new { ok = true, path = dest });
+                    return;
+                }
+
+                if (method == "POST" && path == "/v1/tv-meta")
+                {
+                    var raw = await ReadBody(stream, length, token);
+                    try
+                    {
+                        var meta = JsonSerializer.Deserialize<LinkTvMetaDto>(raw, LinkProtocol.Json);
+                        if (meta is not null)
+                        {
+                            if (meta.Port > 0)
+                            {
+                                _tvPort = meta.Port;
+                            }
+
+                            _tvOfferHosts.Clear();
+                            foreach (var host in meta.Hosts.Where(item => !string.IsNullOrWhiteSpace(item)))
+                            {
+                                _tvOfferHosts.Add(host);
+                            }
+                        }
+                    }
+                    catch
+                    {
+                    }
+
+                    await WriteJson(stream, 200, new { ok = true });
+                    return;
+                }
+
+                if (method == "POST" && path == "/v1/browse-result")
+                {
+                    var raw = Encoding.UTF8.GetString(await ReadBody(stream, length, token));
+                    try
+                    {
+                        using var doc = JsonDocument.Parse(raw);
+                        var id = doc.RootElement.TryGetProperty("id", out var idEl) ? idEl.GetString() : null;
+                        if (!string.IsNullOrWhiteSpace(id) && id == _browseWaitId)
+                        {
+                            _browseWait?.TrySetResult(raw);
+                            _browseAsk = null;
+                            _browseWaitId = null;
+                            _browseWait = null;
+                        }
+                    }
+                    catch
+                    {
+                    }
+
+                    await WriteJson(stream, 200, new { ok = true });
                     return;
                 }
 
@@ -734,6 +944,8 @@ public sealed class LinkServer : IDisposable
                     Duration = offer.Duration,
                 }
                 : null,
+            Browse = _browseAsk,
+            VodAsk = _vodAsk,
         };
     }
 
@@ -1020,26 +1232,39 @@ public sealed class LinkServer : IDisposable
     {
         var have = new List<LinkHaveDto>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        void Add(string key, string title, string? path)
+        {
+            if (string.IsNullOrWhiteSpace(key) || !seen.Add(key))
+            {
+                return;
+            }
+
+            have.Add(HaveDto(key, title, path));
+        }
+
         foreach (var pair in _inboxKeys)
         {
-            if (seen.Add(pair.Key))
+            var title = Path.GetFileNameWithoutExtension(pair.Value);
+            Add(pair.Key, title, pair.Value);
+            if (File.Exists(pair.Value))
             {
-                have.Add(HaveDto(pair.Key, Path.GetFileNameWithoutExtension(pair.Value), pair.Value));
+                var info = new FileInfo(pair.Value);
+                Add(info.Name.ToLowerInvariant() + "|" + info.Length, title, pair.Value);
             }
         }
 
         foreach (var item in list.Items)
         {
             var key = InboxKeyOf(item.Path, item.Title);
-            if (seen.Add(key))
+            Add(key, item.Title, item.Path);
+            Add("title|" + item.Title.Trim().ToLowerInvariant(), item.Title, item.Path);
+            foreach (var pair in _inboxKeys)
             {
-                have.Add(HaveDto(key, item.Title, item.Path));
-            }
-
-            var titleKey = "title|" + item.Title.Trim().ToLowerInvariant();
-            if (seen.Add(titleKey))
-            {
-                have.Add(new LinkHaveDto { Key = titleKey, Title = item.Title });
+                if (pair.Value.Equals(item.Path, StringComparison.OrdinalIgnoreCase))
+                {
+                    Add(pair.Key, item.Title, item.Path);
+                }
             }
         }
 
@@ -1233,15 +1458,16 @@ public sealed class LinkServer : IDisposable
 
     private long ProgressOf(string? key, string? title, string? path)
     {
+        var ms = 0L;
         if (!string.IsNullOrWhiteSpace(key) && _progress.TryGetValue(key, out var byKey))
         {
-            return byKey.PositionMs;
+            ms = Math.Max(ms, byKey.PositionMs);
         }
 
         if (!string.IsNullOrWhiteSpace(title) &&
             _progress.TryGetValue("title|" + title.Trim().ToLowerInvariant(), out var byTitle))
         {
-            return byTitle.PositionMs;
+            ms = Math.Max(ms, byTitle.PositionMs);
         }
 
         if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
@@ -1250,11 +1476,19 @@ public sealed class LinkServer : IDisposable
             var fileKey = file.Name.ToLowerInvariant() + "|" + file.Length;
             if (_progress.TryGetValue(fileKey, out var byFile))
             {
-                return byFile.PositionMs;
+                ms = Math.Max(ms, byFile.PositionMs);
+            }
+
+            try
+            {
+                ms = Math.Max(ms, _view().LinkedResumeMs(path));
+            }
+            catch
+            {
             }
         }
 
-        return 0;
+        return ms;
     }
 
     private void RememberProgress(List<LinkProgressDto>? items)
@@ -1276,7 +1510,60 @@ public sealed class LinkServer : IDisposable
             {
                 _progress["title|" + item.Title.Trim().ToLowerInvariant()] = item;
             }
+
+            var path = ResolveProgressPath(item.Key, item.Title);
+            if (path is not null)
+            {
+                try
+                {
+                    _view().ImportLinkedResume(path, item.Title, item.PositionMs, item.DurationMs);
+                }
+                catch
+                {
+                }
+            }
         }
+    }
+
+    private string? ResolveProgressPath(string key, string? title)
+    {
+        if (_inboxKeys.TryGetValue(key, out var mapped) && (File.Exists(mapped) || UrlSanitizer.IsUrl(mapped)))
+        {
+            return mapped;
+        }
+
+        if (!string.IsNullOrWhiteSpace(title))
+        {
+            var titleKey = "title|" + title.Trim().ToLowerInvariant();
+            if (_inboxKeys.TryGetValue(titleKey, out mapped) && File.Exists(mapped))
+            {
+                return mapped;
+            }
+        }
+
+        try
+        {
+            foreach (var item in _view().Playlist.Items)
+            {
+                if (!string.IsNullOrWhiteSpace(title) &&
+                    item.Title.Equals(title, StringComparison.OrdinalIgnoreCase) &&
+                    File.Exists(item.Path))
+                {
+                    return item.Path;
+                }
+
+                if (InboxKeyOf(item.Path, item.Title).Equals(key, StringComparison.OrdinalIgnoreCase) &&
+                    File.Exists(item.Path))
+                {
+                    return item.Path;
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
     }
 
     private LinkHaveDto HaveDto(string key, string title, string? path)
@@ -1311,7 +1598,7 @@ public sealed class LinkServer : IDisposable
         return "";
     }
 
-    private static object Browse(string? path)
+    private static object Browse(string? path, bool deep = false)
     {
         var grants = SharedFolders.List();
         if (string.IsNullOrWhiteSpace(path))
@@ -1339,14 +1626,15 @@ public sealed class LinkServer : IDisposable
             };
         }
 
-        var dirs = Directory.EnumerateDirectories(resolved)
-            .Where(item => !Path.GetFileName(item).StartsWith('.'))
-            .OrderBy(item => Path.GetFileName(item), StringComparer.OrdinalIgnoreCase)
-            .Select(item => new { name = Path.GetFileName(item), path = item })
-            .ToList();
-        var videos = MediaOrder.SortByTitle(
-                Directory.EnumerateFiles(resolved).Where(MediaFiles.IsSupported),
-                Path.GetFileNameWithoutExtension)
+        var dirs = deep
+            ? new List<object>()
+            : Directory.EnumerateDirectories(resolved)
+                .Where(item => !Path.GetFileName(item).StartsWith('.'))
+                .OrderBy(item => Path.GetFileName(item), StringComparer.OrdinalIgnoreCase)
+                .Select(item => (object)new { name = Path.GetFileName(item), path = item })
+                .ToList();
+        var files = deep ? EnumerateVideosDeep(resolved, 400) : Directory.EnumerateFiles(resolved).Where(MediaFiles.IsSupported);
+        var videos = MediaOrder.SortByTitle(files, Path.GetFileNameWithoutExtension)
             .Select(item =>
             {
                 var info = new FileInfo(item);
@@ -1367,6 +1655,63 @@ public sealed class LinkServer : IDisposable
             dirs,
             videos,
         };
+    }
+
+    private static IEnumerable<string> EnumerateVideosDeep(string root, int cap)
+    {
+        var stack = new Stack<string>();
+        stack.Push(root);
+        var count = 0;
+        while (stack.Count > 0 && count < cap)
+        {
+            var dir = stack.Pop();
+            IEnumerable<string> files;
+            try
+            {
+                files = Directory.EnumerateFiles(dir);
+            }
+            catch
+            {
+                continue;
+            }
+
+            foreach (var file in files)
+            {
+                if (!MediaFiles.IsSupported(file))
+                {
+                    continue;
+                }
+
+                yield return file;
+                if (++count >= cap)
+                {
+                    yield break;
+                }
+            }
+
+            IEnumerable<string> kids;
+            try
+            {
+                kids = Directory.EnumerateDirectories(dir);
+            }
+            catch
+            {
+                continue;
+            }
+
+            foreach (var kid in kids)
+            {
+                var name = Path.GetFileName(kid);
+                if (name.StartsWith('.') ||
+                    name.Equals("$RECYCLE.BIN", StringComparison.OrdinalIgnoreCase) ||
+                    name.Equals("System Volume Information", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                stack.Push(kid);
+            }
+        }
     }
 
     private static string? ParentOf(string path, List<string> grants)
@@ -1402,7 +1747,7 @@ public sealed class LinkServer : IDisposable
         var status = start == 0 && end == total - 1 ? "200 OK" : "206 Partial Content";
         var head = new StringBuilder()
             .Append("HTTP/1.1 ").Append(status).Append("\r\n")
-            .Append("Content-Type: application/octet-stream\r\n")
+            .Append("Content-Type: ").Append(FileContentType(path)).Append("\r\n")
             .Append("Accept-Ranges: bytes\r\n")
             .Append("Content-Length: ").Append(length).Append("\r\n");
         if (status.StartsWith("206"))
@@ -1427,7 +1772,50 @@ public sealed class LinkServer : IDisposable
                 left -= n;
             }
         }
+
+        await stream.FlushAsync();
     }
+
+    private static void TryAdbForward(int port)
+    {
+        try
+        {
+            var adb = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Android",
+                "Sdk",
+                "platform-tools",
+                "adb.exe");
+            if (!File.Exists(adb))
+            {
+                return;
+            }
+
+            using var proc = Process.Start(new ProcessStartInfo
+            {
+                FileName = adb,
+                Arguments = $"forward tcp:{port} tcp:{port}",
+                CreateNoWindow = true,
+                UseShellExecute = false,
+            });
+            proc?.WaitForExit(2000);
+        }
+        catch
+        {
+        }
+    }
+
+    private static string FileContentType(string path) =>
+        Path.GetExtension(path).ToLowerInvariant() switch
+        {
+            ".mp4" or ".m4v" or ".mov" => "video/mp4",
+            ".mkv" => "video/x-matroska",
+            ".webm" => "video/webm",
+            ".avi" => "video/x-msvideo",
+            ".ts" or ".m2ts" => "video/mp2t",
+            ".mp3" => "audio/mpeg",
+            _ => "application/octet-stream",
+        };
 
     private string TokenPath() => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),

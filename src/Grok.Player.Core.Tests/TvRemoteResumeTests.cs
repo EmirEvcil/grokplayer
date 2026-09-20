@@ -125,6 +125,21 @@ public sealed class TvRemoteResumeTests
     }
 
     [Fact]
+    public void Tv_progress_import_offers_pc_resume_on_playlist_open()
+    {
+        using var box = Harness.WithResume(0);
+        ResumeRecord? offered = null;
+        box.View.ResumeOffered += record => offered = record;
+        box.View.ImportLinkedResume(box.Path, "Movie", 30_000, 120_000);
+        Assert.Equal(30_000, box.View.LinkedResumeMs(box.Path));
+        box.View.Open(box.Path);
+        box.Host.ProcessPendingEvents();
+        Assert.NotNull(offered);
+        Assert.Equal(30, offered!.Seconds, 0.1);
+        Assert.Equal(PlayerState.Paused, box.View.Player.State);
+    }
+
+    [Fact]
     public void Restore_without_playing_does_not_steal_next_local_resume()
     {
         using var box = Harness.WithResume(30);
